@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cache-sim"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.13",
+    "polars>=0.20",
+    "marisa-trie>=0.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-benchmark",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sim*", "scripts*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

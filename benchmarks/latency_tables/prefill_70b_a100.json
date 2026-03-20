@@ -1,0 +1,8 @@
+{
+  "model": "llama3-70b",
+  "gpu": "A100-80GB",
+  "precision": "fp16",
+  "note": "single-sequence prefill, no batching",
+  "tokens":     [512,   1024,  2048,  4096,  8192,  16384, 32768],
+  "latency_us": [45000, 90000, 200000, 520000, 1400000, 4800000, 17000000]
+}

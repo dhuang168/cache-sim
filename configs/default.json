@@ -1,0 +1,129 @@
+{
+  "run_id": "default-v1",
+  "seed": 42,
+  "tiers": [
+    {
+      "name": "L1",
+      "capacity_bytes": 85899345920,
+      "bandwidth_bytes_per_s": 3000000000000,
+      "latency_floor_us": 1,
+      "block_size_bytes": 5120
+    },
+    {
+      "name": "L2",
+      "capacity_bytes": 4398046511104,
+      "bandwidth_bytes_per_s": 64000000000,
+      "latency_floor_us": 10,
+      "block_size_bytes": 33554432
+    },
+    {
+      "name": "L3A",
+      "capacity_bytes": 21990232555520,
+      "bandwidth_bytes_per_s": 7000000000,
+      "latency_floor_us": 100,
+      "block_size_bytes": 268435456
+    }
+  ],
+  "model": {
+    "model_id": "llama3-70b",
+    "n_layers": 80,
+    "n_kv_heads": 8,
+    "head_dim": 128,
+    "bytes_per_element": 2
+  },
+  "profiles": [
+    {
+      "name": "chat",
+      "arrival_rate_peak": 100.0,
+      "diurnal_peak_trough_ratio": 4.0,
+      "iat_mean_s": 45.0,
+      "iat_dist": "exponential",
+      "input_len_mean_tokens": 150,
+      "input_len_sigma_tokens": 75,
+      "output_len_pareto_alpha": 2.0,
+      "output_len_pareto_xmin": 50,
+      "context_growth_min_tokens": 100,
+      "context_growth_max_tokens": 500,
+      "prefix_stability_initial": 0.9,
+      "prefix_stability_final": 0.3,
+      "session_duration_mean_s": 600.0,
+      "session_duration_dist": "lognormal",
+      "shared_system_prefix_tokens": 2048
+    },
+    {
+      "name": "coding",
+      "arrival_rate_peak": 50.0,
+      "diurnal_peak_trough_ratio": 4.0,
+      "iat_mean_s": 360.0,
+      "iat_dist": "lognormal",
+      "input_len_mean_tokens": 800,
+      "input_len_sigma_tokens": 400,
+      "output_len_pareto_alpha": 1.5,
+      "output_len_pareto_xmin": 100,
+      "context_growth_min_tokens": 500,
+      "context_growth_max_tokens": 2000,
+      "prefix_stability_initial": 0.85,
+      "prefix_stability_final": 0.4,
+      "session_duration_mean_s": 3600.0,
+      "session_duration_dist": "lognormal",
+      "shared_system_prefix_tokens": 2048
+    },
+    {
+      "name": "batch",
+      "arrival_rate_peak": 200.0,
+      "diurnal_peak_trough_ratio": 1.5,
+      "iat_mean_s": 0.1,
+      "iat_dist": "exponential",
+      "input_len_mean_tokens": 1200,
+      "input_len_sigma_tokens": 600,
+      "output_len_pareto_alpha": 2.5,
+      "output_len_pareto_xmin": 30,
+      "context_growth_min_tokens": 0,
+      "context_growth_max_tokens": 0,
+      "prefix_stability_initial": 1.0,
+      "prefix_stability_final": 1.0,
+      "session_duration_mean_s": 1.0,
+      "session_duration_dist": "exponential",
+      "shared_system_prefix_tokens": 2048
+    },
+    {
+      "name": "agent",
+      "arrival_rate_peak": 30.0,
+      "diurnal_peak_trough_ratio": 4.0,
+      "iat_mean_s": 15.0,
+      "iat_dist": "exponential",
+      "input_len_mean_tokens": 400,
+      "input_len_sigma_tokens": 200,
+      "output_len_pareto_alpha": 1.2,
+      "output_len_pareto_xmin": 80,
+      "context_growth_min_tokens": 300,
+      "context_growth_max_tokens": 1500,
+      "prefix_stability_initial": 0.8,
+      "prefix_stability_final": 0.2,
+      "session_duration_mean_s": 1800.0,
+      "session_duration_dist": "lognormal",
+      "shared_system_prefix_tokens": 2048
+    }
+  ],
+  "profile_mix": {
+    "chat": 0.4,
+    "coding": 0.2,
+    "batch": 0.25,
+    "agent": 0.15
+  },
+  "service": {
+    "n_prefill_slots": 32,
+    "n_decode_slots": 256,
+    "prefill_queue_max": 128,
+    "decode_queue_max": 512
+  },
+  "ttl_l2_s": 300.0,
+  "ttl_l3a_s": 3600.0,
+  "eviction_hbm_threshold": 0.9,
+  "eviction_ram_threshold": 0.95,
+  "sim_duration_s": 3600.0,
+  "warmup_s": 300.0,
+  "epoch_report_interval_s": 60.0,
+  "enable_suffix_cache": false,
+  "enable_l3b_object_store": false
+}
