@@ -10,8 +10,8 @@ build/
 .venv/
 venv/
 
-# Generated plots
-plots/*.png
+# Generated plots (example plots are checked in)
+# plots/*.png
 
 # IDE
 .idea/
