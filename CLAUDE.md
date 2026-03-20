@@ -1,0 +1,101 @@
+# CLAUDE.md — Project Intelligence for cache_sim
+
+## What This Project Is
+
+A discrete-event simulator for multi-tier (L1/L2/L3A) prompt KV cache systems targeting LLM inference workloads. The simulator models request lifecycles from arrival through prefill, decode, and KV cache placement, with TTL-based tier migration and occupancy-driven eviction.
+
+## Quick Commands
+
+```bash
+# Run all tests
+.venv/bin/python -m pytest tests/ -v
+
+# Run just invariant tests
+.venv/bin/python -m pytest tests/test_invariants.py -v
+
+# Generate sanity plots
+.venv/bin/python scripts/sanity_plots.py
+
+# Run parameter sweep
+.venv/bin/python scripts/sweep.py --config configs/default.json --output results/sweep.json
+```
+
+## Important: Do NOT append `2>&1` to pytest commands
+
+This causes output issues. Run pytest without stderr redirection.
+
+## Architecture Overview
+
+- **sim/engine.py** — Main event loop. `SimEngine.run()` is the entry point. Uses a min-heap for event scheduling with microsecond sim clock.
+- **sim/events.py** — Event types and request FSM. The FSM enforces legal state transitions (QUEUED -> CACHE_LOOKUP -> HIT/MISS -> PREFILLING -> DECODE_QUEUED -> DECODING -> KV_WRITE -> COMPLETE).
+- **sim/cache.py** — `CacheObject`, `TierStore` (per-tier storage manager), `PrefixTrie` (token hash-based prefix matching), `kv_size_bytes()` formula.
+- **sim/eviction.py** — `EvictionEngine` manages L1->L2->L3A movement. L1 eviction is watermark-based, L2->L3A is TTL-driven, L3A cleanup is LRU.
+- **sim/oracle.py** — `PrefillOracle` (piecewise-linear interpolation from A100 benchmark table), `DecodeOracle` (sqrt batch degradation model), `transfer_time_us()`, `is_cache_worthwhile()`.
+- **sim/workload.py** — `WorkloadSynthesizer` generates arrivals via NHPP (thinning algorithm) with sinusoidal diurnal modulation. Four profiles: chat, coding, batch, agent.
+- **sim/service.py** — `ServiceModel` tracks prefill/decode GPU slot pools with queue backpressure.
+- **sim/metrics.py** — `MetricsCollector` accumulates TTFT, hit rates, evictions, occupancy, sharing factor. `.report()` produces the summary dict.
+- **sim/config.py** — Dataclass-based config loaded from JSON. `SimConfig.from_json()` is the standard entry point.
+
+## Key Design Constraints
+
+- **Sim clock is int64 microseconds** — never use floats for time in the engine.
+- **Events must be scheduled in the future** — `assert event.time_us >= self.sim_clock_us`.
+- **Request FSM is strict** — `validate_transition()` in events.py raises `SimError` on illegal transitions.
+- **Metrics are only collected after warmup** — the `collecting` flag in `_dispatch()` controls this.
+- **KV size formula**: `2 * n_layers * n_kv_heads * head_dim * bytes_per_element * token_count`. For 70B FP16: 327,680 bytes per token.
+
+## Test Structure
+
+### Invariant Tests (`tests/test_invariants.py`)
+These are **mandatory** — must all pass before any exploratory run. They test boundary conditions:
+1. `test_zero_ttl_collapses_l2` — TTL=0 means L2 occupancy stays ~0%
+2. `test_infinite_l1_no_evictions` — L1 = 2^50 bytes means 0 evictions
+3. `test_no_shared_prefix_sharing_factor_one` — No shared prefix means sharing_factor = 1.0
+4. `test_zero_bandwidth_penalty_prefers_restore` — Infinite bandwidth means 0 BREAK_EVEN events
+
+### Unit Tests
+- `test_kv_size.py` — KV size math, block allocation, fragmentation
+- `test_oracle.py` — Prefill/decode oracle correctness, transfer time calculation
+
+## Debug History and Lessons Learned
+
+### Bug: L2 occupancy not collapsing with TTL=0
+**Symptom**: `test_zero_ttl_collapses_l2` failed — L2 showed non-zero occupancy.
+**Root cause**: When `ttl_l2_s=0`, the TTL fire event was scheduled at exactly `sim_clock_us + 0`, but the object placement and TTL scheduling happened in the same event handler, so the object was briefly resident.
+**Fix**: Added explicit check in `_place_kv_object()` — if `ttl_l2_s <= 0`, immediately hibernate the object from L2 to L3A after placement. Also added immediate hibernation path in `_on_ttl_fire()`.
+
+### Bug: Infinite L1 still showed evictions
+**Symptom**: `test_infinite_l1_no_evictions` failed with eviction count > 0.
+**Root cause**: The eviction engine's `needs_l1_eviction()` was comparing against a threshold that could trigger even when the actual occupancy was well below 1%. The epoch report handler was calling `evict_l1_to_l2()` proactively.
+**Fix**: Fixed the epoch report to only evict when `needs_l1_eviction()` returns true AND `used_bytes > target`.
+
+### Bug: Sharing factor not returning 1.0 with zero shared prefix
+**Symptom**: `test_no_shared_prefix_sharing_factor_one` failed.
+**Root cause**: The sharing tracking in `_on_prefill_complete()` was counting tokens from prefix cache hits as "shared" even when `shared_system_prefix_tokens=0`. The contribution was calculated from `cached_tokens` regardless of whether it was a shared or session-private prefix.
+**Fix**: Added guard `if profile.shared_system_prefix_tokens > 0 and cached > 0` before incrementing `tokens_served_from_shared_prefix`.
+
+### Bug: BREAK_EVEN events with infinite bandwidth
+**Symptom**: `test_zero_bandwidth_penalty_prefers_restore` failed with non-zero BREAK_EVEN count.
+**Root cause**: `latency_floor_us` was not being zeroed out alongside bandwidth. Even with infinite bandwidth, the floor latency created a non-zero transfer cost that could make some restores break-even.
+**Fix**: The test now sets both `bandwidth_bytes_per_s = sys.maxsize` AND `latency_floor_us = 0` for all tiers.
+
+### Performance: Tests are slow (~10 min total)
+Each invariant test runs a 60s simulation with 5s warmup. This is inherent to the DES approach — there's no way to skip the event processing. For faster iteration during development, reduce `sim_duration_s` and `warmup_s` further, but the invariant tests need enough events to be meaningful.
+
+## Sanity Plots (`scripts/sanity_plots.py`)
+
+Uses a "stressed" config: 500 MB L1, 10 GB L2, 50 GB L3A, short TTLs. This forces multi-tier activity and makes the plots informative. The default config has L1 = 80 GB which absorbs most objects without evictions, producing less interesting plots.
+
+## Config Tips
+
+- `configs/default.json` is the reference config. Don't modify it — load it and override fields programmatically.
+- Tier order in `tiers[]` must be [L1, L2, L3A] — the engine indexes by position.
+- `profile_mix` weights must sum to 1.0.
+- `enable_suffix_cache` and `enable_l3b_object_store` are v2 features — setting them to `true` raises `NotImplementedError`.
+
+## File Locations
+
+- Benchmark tables: `benchmarks/latency_tables/`
+- Configs: `configs/`
+- Generated plots: `plots/` (gitignored)
+- Sweep results: `results/` (gitignored)
