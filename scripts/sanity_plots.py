@@ -289,12 +289,17 @@ def plot_l1_sensitivity():
 
 # ── Plot 8: Node-scaling — Global vs Local L3A ──
 
-def _collect_node_scaling_data(node_counts, l3a_shared, label):
-    """Run sims for each node count and collect metrics."""
+GPUS_PER_WORKER = 8  # realistic: 8 GPUs per host
+
+
+def _collect_node_scaling_data(worker_counts, l3a_shared, label):
+    """Run sims for each worker count and collect metrics."""
     results = []
-    for n in node_counts:
+    for nw in worker_counts:
+        n_gpus = nw * GPUS_PER_WORKER
         cfg = stressed_config()
-        cfg.service.n_prefill_nodes = n
+        cfg.service.n_prefill_nodes = n_gpus
+        cfg.service.n_gpus_per_worker = GPUS_PER_WORKER
         cfg.service.dispatch_algorithm = "push"
         cfg.service.l3a_shared = l3a_shared
         cfg.service.l3a_remote_latency_us = 50_000 if l3a_shared else 0
@@ -306,7 +311,7 @@ def _collect_node_scaling_data(node_counts, l3a_shared, label):
 
         # Queue utilization %
         q = m.prefill_queue_depth
-        total_queue_max = n * cfg.service.prefill_queue_max
+        total_queue_max = n_gpus * cfg.service.prefill_queue_max
         queue_util = (np.mean(q) / total_queue_max * 100) if q and total_queue_max > 0 else 0.0
 
         # Hit rate breakdown
@@ -329,7 +334,8 @@ def _collect_node_scaling_data(node_counts, l3a_shared, label):
         ttft_p95 = float(np.percentile(all_ttft, 95)) / 1000.0 if all_ttft else 0.0
 
         results.append({
-            "n": n,
+            "n_workers": nw,
+            "n_gpus": n_gpus,
             "queue_util_pct": queue_util,
             "hit_rate": 1.0 - miss_rate,
             "l1_hit": l1_hit, "l2_hit": l2_hit, "l3a_hit": l3a_hit, "miss": miss_rate,
@@ -337,41 +343,42 @@ def _collect_node_scaling_data(node_counts, l3a_shared, label):
             "ttft_p95_ms": ttft_p95,
             "evict_rate": evict_rate,
         })
-        print(f"    {label} N={n}: hit={1-miss_rate:.1%} qw_p95={qw_p95:.0f}ms ttft_p95={ttft_p95:.0f}ms")
+        print(f"    {label} {nw}W×{GPUS_PER_WORKER}G={n_gpus}GPUs: hit={1-miss_rate:.1%} qw_p95={qw_p95:.0f}ms ttft_p95={ttft_p95:.0f}ms")
     return results
 
 
 def plot_node_scaling():
-    node_counts = [1, 2, 4, 8]
+    worker_counts = [1, 2, 4, 8]
 
     print("  Collecting global L3A data...")
-    global_data = _collect_node_scaling_data(node_counts, l3a_shared=True, label="Global")
+    global_data = _collect_node_scaling_data(worker_counts, l3a_shared=True, label="Global")
     print("  Collecting local L3A data...")
-    local_data = _collect_node_scaling_data(node_counts, l3a_shared=False, label="Local")
+    local_data = _collect_node_scaling_data(worker_counts, l3a_shared=False, label="Local")
 
+    gpu_counts = [d["n_gpus"] for d in global_data]
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
     # Panel 1: Cache hit rate breakdown (global vs local)
     ax = axes[0, 0]
     g_hit = [d["hit_rate"] * 100 for d in global_data]
     l_hit = [d["hit_rate"] * 100 for d in local_data]
-    ax.plot(node_counts, g_hit, "o-", linewidth=2, color="#2ecc71", label="Global L3A")
-    ax.plot(node_counts, l_hit, "s--", linewidth=2, color="#e67e22", label="Local L3A")
-    ax.set_xlabel("Prefill Nodes")
+    ax.plot(gpu_counts, g_hit, "o-", linewidth=2, color="#2ecc71", label="Global L3A")
+    ax.plot(gpu_counts, l_hit, "s--", linewidth=2, color="#e67e22", label="Local L3A")
+    ax.set_xlabel("Total GPUs (8 per worker)")
     ax.set_ylabel("Cache Hit Rate (%)")
     ax.set_title("(b) Cache Hit Rate")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    # Panel 2: Per-node eviction rate
+    # Panel 2: Per-GPU eviction rate
     ax = axes[0, 1]
-    g_evict = [d["evict_rate"] / d["n"] for d in global_data]
-    l_evict = [d["evict_rate"] / d["n"] for d in local_data]
-    ax.plot(node_counts, g_evict, "o-", linewidth=2, color="#2ecc71", label="Global L3A")
-    ax.plot(node_counts, l_evict, "s--", linewidth=2, color="#e67e22", label="Local L3A")
-    ax.set_xlabel("Prefill Nodes")
-    ax.set_ylabel("Evictions/s per Node")
-    ax.set_title("(a) Per-Node Eviction Rate")
+    g_evict = [d["evict_rate"] / d["n_gpus"] for d in global_data]
+    l_evict = [d["evict_rate"] / d["n_gpus"] for d in local_data]
+    ax.plot(gpu_counts, g_evict, "o-", linewidth=2, color="#2ecc71", label="Global L3A")
+    ax.plot(gpu_counts, l_evict, "s--", linewidth=2, color="#e67e22", label="Local L3A")
+    ax.set_xlabel("Total GPUs (8 per worker)")
+    ax.set_ylabel("Evictions/s per GPU")
+    ax.set_title("(a) Per-GPU Eviction Rate")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
@@ -379,9 +386,9 @@ def plot_node_scaling():
     ax = axes[0, 2]
     g_qw = [d["qw_p95_ms"] for d in global_data]
     l_qw = [d["qw_p95_ms"] for d in local_data]
-    ax.plot(node_counts, g_qw, "o-", linewidth=2, color="#2ecc71", label="Global L3A")
-    ax.plot(node_counts, l_qw, "s--", linewidth=2, color="#e67e22", label="Local L3A")
-    ax.set_xlabel("Prefill Nodes")
+    ax.plot(gpu_counts, g_qw, "o-", linewidth=2, color="#2ecc71", label="Global L3A")
+    ax.plot(gpu_counts, l_qw, "s--", linewidth=2, color="#e67e22", label="Local L3A")
+    ax.set_xlabel("Total GPUs (8 per worker)")
     ax.set_ylabel("Queue Wait p95 (ms)")
     ax.set_title("(d) Queue Wait p95")
     ax.legend()
@@ -391,11 +398,11 @@ def plot_node_scaling():
     ax = axes[1, 0]
     g_qu = [d["queue_util_pct"] for d in global_data]
     l_qu = [d["queue_util_pct"] for d in local_data]
-    ax.plot(node_counts, g_qu, "o-", linewidth=2, color="#2ecc71", label="Global L3A")
-    ax.plot(node_counts, l_qu, "s--", linewidth=2, color="#e67e22", label="Local L3A")
-    ax.set_xlabel("Prefill Nodes")
+    ax.plot(gpu_counts, g_qu, "o-", linewidth=2, color="#2ecc71", label="Global L3A")
+    ax.plot(gpu_counts, l_qu, "s--", linewidth=2, color="#e67e22", label="Local L3A")
+    ax.set_xlabel("Total GPUs (8 per worker)")
     ax.set_ylabel("Queue Utilization (%)")
-    ax.set_title("Queue Utilization vs Node Count")
+    ax.set_title("Queue Utilization vs GPU Count")
     ax.set_ylim(0, 105)
     ax.legend()
     ax.grid(True, alpha=0.3)
@@ -404,22 +411,24 @@ def plot_node_scaling():
     ax = axes[1, 1]
     g_ttft = [d["ttft_p95_ms"] for d in global_data]
     l_ttft = [d["ttft_p95_ms"] for d in local_data]
-    ax.plot(node_counts, g_ttft, "o-", linewidth=2, color="#2ecc71", label="Global L3A")
-    ax.plot(node_counts, l_ttft, "s--", linewidth=2, color="#e67e22", label="Local L3A")
-    ax.set_xlabel("Prefill Nodes")
+    ax.plot(gpu_counts, g_ttft, "o-", linewidth=2, color="#2ecc71", label="Global L3A")
+    ax.plot(gpu_counts, l_ttft, "s--", linewidth=2, color="#e67e22", label="Local L3A")
+    ax.set_xlabel("Total GPUs (8 per worker)")
     ax.set_ylabel("TTFT p95 (ms)")
-    ax.set_title("(d) TTFT p95 vs Node Count")
+    ax.set_title("(d) TTFT p95 vs GPU Count")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    # Panel 6: L3A latency sensitivity (fixed 4 nodes)
+    # Panel 6: L3A latency sensitivity (fixed 2 workers = 16 GPUs)
     ax = axes[1, 2]
     latencies_ms = [0, 10, 25, 50, 75, 100]
     ttft_at_lat = []
     hit_at_lat = []
+    n_lat_gpus = 2 * GPUS_PER_WORKER  # 2 workers
     for lat_ms in latencies_ms:
         cfg = stressed_config()
-        cfg.service.n_prefill_nodes = 4
+        cfg.service.n_prefill_nodes = n_lat_gpus
+        cfg.service.n_gpus_per_worker = GPUS_PER_WORKER
         cfg.service.l3a_shared = True
         cfg.service.l3a_remote_latency_us = lat_ms * 1000
         cfg.seed = 42
@@ -437,10 +446,10 @@ def plot_node_scaling():
     ax.plot(latencies_ms, ttft_at_lat, "o-", linewidth=2, color="#3498db", label="TTFT p95")
     ax.set_xlabel("Global L3A Remote Latency (ms)")
     ax.set_ylabel("TTFT p95 (ms)")
-    ax.set_title("(f) L3A Latency Sensitivity (4 nodes)")
+    ax.set_title(f"(f) L3A Latency Sensitivity ({n_lat_gpus} GPUs)")
     ax.grid(True, alpha=0.3)
 
-    fig.suptitle("Multi-Node Scaling: Global vs Local L3A", fontsize=14, fontweight="bold")
+    fig.suptitle(f"Multi-Node Scaling: Global vs Local L3A ({GPUS_PER_WORKER} GPUs/worker)", fontsize=14, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(OUT_DIR / "node_scaling.png", dpi=150)
     plt.close(fig)
@@ -451,6 +460,8 @@ def plot_node_scaling():
 
 def plot_ttl_sensitivity():
     ttl_l2_values = [1, 5, 10, 20, 60, 120]
+    n_ttl_workers = 2
+    n_ttl_gpus = n_ttl_workers * GPUS_PER_WORKER
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
     for l3a_shared, label, color, marker in [
@@ -461,7 +472,8 @@ def plot_ttl_sensitivity():
         qw_p95s = []
         for ttl in ttl_l2_values:
             cfg = stressed_config()
-            cfg.service.n_prefill_nodes = 4
+            cfg.service.n_prefill_nodes = n_ttl_gpus
+            cfg.service.n_gpus_per_worker = GPUS_PER_WORKER
             cfg.service.l3a_shared = l3a_shared
             cfg.service.l3a_remote_latency_us = 50_000 if l3a_shared else 0
             cfg.ttl_l2_s = ttl
@@ -489,7 +501,7 @@ def plot_ttl_sensitivity():
     ax2.legend()
     ax2.grid(True, alpha=0.3)
 
-    fig.suptitle("TTL Sensitivity: Global vs Local L3A (4 nodes)", fontsize=13, fontweight="bold")
+    fig.suptitle(f"TTL Sensitivity: Global vs Local L3A ({n_ttl_gpus} GPUs, {n_ttl_workers} workers)", fontsize=13, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     fig.savefig(OUT_DIR / "ttl_sensitivity.png", dpi=150)
     plt.close(fig)
@@ -499,7 +511,7 @@ def plot_ttl_sensitivity():
 # ── Plot 10: Sustaining QPS at SLA ──
 
 def plot_sustaining_qps():
-    node_counts = [1, 2, 4, 8]
+    worker_counts = [1, 2, 4, 8]
     sla_ms = 500.0  # p95 queue wait < 500ms
 
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -509,9 +521,13 @@ def plot_sustaining_qps():
         (False, "Local L3A", "#e67e22", "s--"),
     ]:
         qps_values = []
-        for n in node_counts:
+        gpu_counts = []
+        for nw in worker_counts:
+            n_gpus = nw * GPUS_PER_WORKER
+            gpu_counts.append(n_gpus)
             cfg = stressed_config()
-            cfg.service.n_prefill_nodes = n
+            cfg.service.n_prefill_nodes = n_gpus
+            cfg.service.n_gpus_per_worker = GPUS_PER_WORKER
             cfg.service.l3a_shared = l3a_shared
             cfg.service.l3a_remote_latency_us = 50_000 if l3a_shared else 0
             cfg.seed = 42
@@ -528,20 +544,15 @@ def plot_sustaining_qps():
             sustaining = mult * base_qps
             qps_values.append(sustaining)
             actual_qw = report.get("_queue_wait_p95_ms", 0)
-            print(f"    {label} N={n}: sustaining={sustaining:.0f} qps (mult={mult:.2f}, qw_p95={actual_qw:.0f}ms)")
+            print(f"    {label} {nw}W×{GPUS_PER_WORKER}G={n_gpus}GPUs: sustaining={sustaining:.0f} qps (mult={mult:.2f}, qw_p95={actual_qw:.0f}ms)")
 
-        ax.plot(node_counts, qps_values, marker, linewidth=2, color=color, label=label)
+        ax.plot(gpu_counts, qps_values, marker, linewidth=2, color=color, label=label)
 
-    ax.set_xlabel("Prefill Nodes")
+    ax.set_xlabel(f"Total GPUs ({GPUS_PER_WORKER} per worker)")
     ax.set_ylabel(f"Sustaining QPS (p95 queue wait < {sla_ms:.0f}ms)")
-    ax.set_title("(e) Sustaining QPS at SLA vs Node Count")
+    ax.set_title("(e) Sustaining QPS at SLA vs GPU Count")
     ax.legend()
     ax.grid(True, alpha=0.3)
-
-    # Add ideal linear scaling line
-    if qps_values:
-        ax.plot(node_counts, [node_counts[0] * qps_values[0] / node_counts[0] * n for n in node_counts],
-                "k:", alpha=0.3, label="Ideal linear")
 
     fig.tight_layout()
     fig.savefig(OUT_DIR / "sustaining_qps.png", dpi=150)
