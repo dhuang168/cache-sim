@@ -93,7 +93,8 @@ class SimEngine:
             l2 = TierStore(l2_cfg.name, l2_cfg.capacity_bytes, l2_cfg.block_size_bytes)
             self._worker_l2_stores.append(l2)
             if not self._l3a_shared:
-                local_l3a = TierStore(l3a_cfg.name, l3a_cfg.capacity_bytes, l3a_cfg.block_size_bytes)
+                local_cap = l3a_cfg.capacity_bytes // n_workers
+                local_l3a = TierStore(l3a_cfg.name, local_cap, l3a_cfg.block_size_bytes)
                 self._worker_l3a_stores.append(local_l3a)
             else:
                 self._worker_l3a_stores.append(None)
