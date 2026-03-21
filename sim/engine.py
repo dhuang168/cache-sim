@@ -547,7 +547,7 @@ class SimEngine:
                 if l2.can_fit(l1_obj.size_bytes):
                     l2.insert(cache_key, l1_obj)
                     if collecting:
-                        self.metrics.l1_to_l2_evictions += 1
+                        self.metrics.l1_to_l2_ttl_migrations += 1
 
                     # If L2 TTL is 0, immediately hibernate to L3A
                     if self.config.ttl_l2_s <= 0:
@@ -613,7 +613,7 @@ class SimEngine:
             )
 
         # Record queue depths
-        self.metrics.prefill_queue_depth.append(len(self.service.prefill_queue))
+        self.metrics.prefill_queue_depth.append(len(self._pending_prefills))
         self.metrics.decode_queue_depth.append(len(self.service.decode_queue))
 
         # Record memory pollution

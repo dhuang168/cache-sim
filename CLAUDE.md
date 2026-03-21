@@ -79,12 +79,34 @@ These are **mandatory** — must all pass before any exploratory run. They test 
 **Root cause**: `latency_floor_us` was not being zeroed out alongside bandwidth. Even with infinite bandwidth, the floor latency created a non-zero transfer cost that could make some restores break-even.
 **Fix**: The test now sets both `bandwidth_bytes_per_s = sys.maxsize` AND `latency_floor_us = 0` for all tiers.
 
+### Bug: Queue depth plot showed flat zero
+**Symptom**: `queue_depth.png` showed both prefill and decode queues at 0 throughout the simulation.
+**Root cause**: The engine queues pending prefills in `self._pending_prefills` (a deque), but `_on_epoch_report()` was reading `self.service.prefill_queue` which is never populated (the engine bypasses `ServiceModel.try_admit_prefill()`).
+**Fix**: Changed epoch report to read `len(self._pending_prefills)` instead of `len(self.service.prefill_queue)`.
+
+### Bug: L1 eviction metric conflated TTL migrations with pressure evictions
+**Symptom**: L1 sensitivity plot showed eviction rate *increasing* with L1 capacity and then plateauing, which seemed counter-intuitive.
+**Root cause**: `l1_to_l2_evictions` counted both TTL-driven tier demotions (time-based, constant rate) and occupancy-driven pressure evictions (capacity-dependent). The TTL-driven moves dominated, masking the capacity relationship.
+**Fix**: Split into two metrics: `l1_to_l2_evictions` (pressure-driven only) and `l1_to_l2_ttl_migrations` (TTL-driven). The L1 sensitivity plot now shows both separately. The plateau behavior is correct — once L1 can accept objects, the throughput rate equals the arrival rate regardless of capacity.
+
 ### Performance: Tests are slow (~10 min total)
 Each invariant test runs a 60s simulation with 5s warmup. This is inherent to the DES approach — there's no way to skip the event processing. For faster iteration during development, reduce `sim_duration_s` and `warmup_s` further, but the invariant tests need enough events to be meaningful.
 
 ## Sanity Plots (`scripts/sanity_plots.py`)
 
 Uses a "stressed" config: 500 MB L1, 10 GB L2, 50 GB L3A, short TTLs. This forces multi-tier activity and makes the plots informative. The default config has L1 = 80 GB which absorbs most objects without evictions, producing less interesting plots.
+
+## Metrics: Eviction Types
+
+The simulator distinguishes two types of L1->L2 object movement:
+- **Pressure evictions** (`l1_to_l2_evictions`): Forced out because L1 occupancy exceeded `eviction_hbm_threshold` or a new object needed space. These should decrease with larger L1.
+- **TTL migrations** (`l1_to_l2_ttl_migrations`): Scheduled tier demotion when the `ttl_l2_s` timer expires. Rate is proportional to arrival rate, independent of L1 size.
+
+## Savings Classes
+
+- **WORTHWHILE**: Restoring cached KV from this tier is faster than recomputing from scratch. Transfer time < recompute time.
+- **BREAK_EVEN**: Restoring from cache takes as long as (or longer than) recomputing. Only applies to L3A hits (SSD latency can exceed recompute cost for small prefills).
+- L2 hits are always WORTHWHILE (DRAM bandwidth makes transfer negligible vs compute).
 
 ## Config Tips
 
@@ -97,5 +119,5 @@ Uses a "stressed" config: 500 MB L1, 10 GB L2, 50 GB L3A, short TTLs. This force
 
 - Benchmark tables: `benchmarks/latency_tables/`
 - Configs: `configs/`
-- Generated plots: `plots/` (gitignored)
+- Generated plots: `plots/`
 - Sweep results: `results/` (gitignored)

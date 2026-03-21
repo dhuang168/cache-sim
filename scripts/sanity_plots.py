@@ -231,7 +231,8 @@ def plot_l1_sensitivity():
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
     l1_sizes_gb = [0.25, 0.5, 1, 2, 4, 10, 40, 80]
     l1_hits, l2_hits, l3a_hits, misses = [], [], [], []
-    eviction_rates = []
+    pressure_eviction_rates = []
+    ttl_migration_rates = []
 
     for gb in l1_sizes_gb:
         cfg = stressed_config()
@@ -246,7 +247,8 @@ def plot_l1_sensitivity():
         l3a_hits.append((l3a_w + l3a_b) / total * 100)
         misses.append(m.savings_events.get("COLD_MISS", 0) / total * 100)
         eff_s = max(1, m.effective_sim_us) / 1e6
-        eviction_rates.append(m.l1_to_l2_evictions / eff_s)
+        pressure_eviction_rates.append(m.l1_to_l2_evictions / eff_s)
+        ttl_migration_rates.append(m.l1_to_l2_ttl_migrations / eff_s)
         print(f"    L1={gb}GB done")
 
     # Stacked bar for hit rates
@@ -266,11 +268,15 @@ def plot_l1_sensitivity():
     ax1.legend(loc="lower right")
     ax1.grid(True, alpha=0.3, axis="y")
 
-    ax2.plot(l1_sizes_gb, eviction_rates, "o-", color="#9b59b6", linewidth=2)
+    ax2.plot(l1_sizes_gb, pressure_eviction_rates, "o-", color="#e74c3c", linewidth=2,
+             label="Pressure evictions")
+    ax2.plot(l1_sizes_gb, ttl_migration_rates, "s--", color="#3498db", linewidth=2,
+             label="TTL migrations")
     ax2.set_xlabel("L1 Capacity (GB)")
-    ax2.set_ylabel("L1->L2 Evictions/s")
-    ax2.set_title("Eviction Rate vs L1 Size")
+    ax2.set_ylabel("L1->L2 Events/s")
+    ax2.set_title("L1->L2 Movement Rate vs L1 Size")
     ax2.set_xscale("log", base=2)
+    ax2.legend()
     ax2.grid(True, alpha=0.3)
 
     fig.tight_layout()
@@ -290,7 +296,8 @@ def main():
     print(f"  Sharing factor:  {report['sharing_factor']}")
     print(f"  Hit rates:       {report['cache_hit_rate']}")
     print(f"  Tier saturation: {report['tier_saturation_pct']}")
-    print(f"  Evictions L1->L2:  {report['eviction_rate_per_s']['L1_to_L2']}/s")
+    print(f"  L1->L2 pressure:   {report['eviction_rate_per_s']['L1_to_L2_pressure']}/s")
+    print(f"  L1->L2 TTL:        {report['eviction_rate_per_s']['L1_to_L2_ttl']}/s")
     print(f"  Evictions L2->L3A: {report['eviction_rate_per_s']['L2_to_L3A']}/s")
     print(f"  Cold evictions:    {report['session_cold_evictions']}")
     print()

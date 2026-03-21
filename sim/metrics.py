@@ -55,7 +55,8 @@ class MetricsCollector:
     )
 
     # Eviction counts
-    l1_to_l2_evictions: int = 0
+    l1_to_l2_evictions: int = 0          # pressure-driven (occupancy or placement)
+    l1_to_l2_ttl_migrations: int = 0     # TTL-driven tier migration (not pressure)
     l2_to_l3a_evictions: int = 0
     session_cold_evictions: int = 0
 
@@ -122,7 +123,8 @@ class MetricsCollector:
         # Eviction rates
         eff_s = max(1, self.effective_sim_us) / 1_000_000
         eviction_rate = {
-            "L1_to_L2": r(self.l1_to_l2_evictions / eff_s),
+            "L1_to_L2_pressure": r(self.l1_to_l2_evictions / eff_s),
+            "L1_to_L2_ttl": r(self.l1_to_l2_ttl_migrations / eff_s),
             "L2_to_L3A": r(self.l2_to_l3a_evictions / eff_s),
         }
 
