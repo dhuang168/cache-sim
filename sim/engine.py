@@ -604,11 +604,14 @@ class SimEngine:
         # FSM: PREFILLING -> DECODE_QUEUED
         self._transition(request_id, RequestState.DECODE_QUEUED)
 
-        # Record TTFT
+        # Record TTFT and prefill duration
         if collecting and request_id in self.request_arrival_us:
             ttft = self.sim_clock_us - self.request_arrival_us[request_id]
             component = payload.get("ttft_component", "cold_miss")
             self.metrics.ttft_us[component].append(ttft)
+        prefill_us = payload.get("prefill_us", 0)
+        if collecting and prefill_us > 0:
+            self.metrics.prefill_duration_us.append(prefill_us)
 
         # Sharing tracking
         if collecting:
@@ -947,6 +950,24 @@ class SimEngine:
         # Accumulate prefill blocked time
         self.metrics.prefill_slot_blocked_us += self.service.get_blocked_us(self.sim_clock_us)
 
+        # Slot utilization: fraction of total prefill slots that are busy
+        total_slots = sum(n.prefill_slots_total for n in self.nodes)
+        busy_slots = sum(n.prefill_slots_total - n.prefill_slots_free for n in self.nodes)
+        self.metrics.slot_utilization_pct.append(
+            (busy_slots / total_slots * 100.0) if total_slots > 0 else 0.0
+        )
+
+        # L3A object count
+        if self._l3a_shared:
+            self.metrics.l3a_object_count.append(len(self._shared_l3a.objects))
+        else:
+            self.metrics.l3a_object_count.append(
+                sum(len(s.objects) for s in self._worker_l3a_stores if s)
+            )
+
+        # Cold evictions this epoch (delta since last epoch)
+        self.metrics.cold_evictions_per_epoch.append(0)  # placeholder, incremented below
+
         # Run L1 eviction checks per GPU node
         for node_id, node in enumerate(self.nodes):
             eviction = self._node_eviction[node_id]
@@ -981,6 +1002,8 @@ class SimEngine:
                         continue
                 self._shared_l3a.remove(key)
                 self.metrics.session_cold_evictions += 1
+                if self.metrics.cold_evictions_per_epoch:
+                    self.metrics.cold_evictions_per_epoch[-1] += 1
         else:
             # Local L3A: check once per worker
             checked_workers_l3a = set()
@@ -998,6 +1021,8 @@ class SimEngine:
                             continue
                     node.l3a_store.remove(key)
                     self.metrics.session_cold_evictions += 1
+                    if self.metrics.cold_evictions_per_epoch:
+                        self.metrics.cold_evictions_per_epoch[-1] += 1
 
     # ─── Helpers ───
 

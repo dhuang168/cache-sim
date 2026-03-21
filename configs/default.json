@@ -35,7 +35,7 @@
     {
       "name": "chat",
       "arrival_rate_peak": 100.0,
-      "diurnal_peak_trough_ratio": 4.0,
+      "diurnal_peak_trough_ratio": 2.0,
       "iat_mean_s": 45.0,
       "iat_dist": "exponential",
       "input_len_mean_tokens": 150,
@@ -52,8 +52,8 @@
     },
     {
       "name": "coding",
-      "arrival_rate_peak": 50.0,
-      "diurnal_peak_trough_ratio": 4.0,
+      "arrival_rate_peak": 100.0,
+      "diurnal_peak_trough_ratio": 2.0,
       "iat_mean_s": 360.0,
       "iat_dist": "lognormal",
       "input_len_mean_tokens": 8000,
@@ -70,8 +70,8 @@
     },
     {
       "name": "batch",
-      "arrival_rate_peak": 200.0,
-      "diurnal_peak_trough_ratio": 1.5,
+      "arrival_rate_peak": 100.0,
+      "diurnal_peak_trough_ratio": 2.0,
       "iat_mean_s": 0.1,
       "iat_dist": "exponential",
       "input_len_mean_tokens": 1200,
@@ -88,8 +88,8 @@
     },
     {
       "name": "agent",
-      "arrival_rate_peak": 30.0,
-      "diurnal_peak_trough_ratio": 4.0,
+      "arrival_rate_peak": 100.0,
+      "diurnal_peak_trough_ratio": 2.0,
       "iat_mean_s": 15.0,
       "iat_dist": "exponential",
       "input_len_mean_tokens": 400,
@@ -106,8 +106,8 @@
     },
     {
       "name": "agentic_coding",
-      "arrival_rate_peak": 20.0,
-      "diurnal_peak_trough_ratio": 4.0,
+      "arrival_rate_peak": 100.0,
+      "diurnal_peak_trough_ratio": 2.0,
       "iat_mean_s": 30.0,
       "iat_dist": "exponential",
       "input_len_mean_tokens": 15000,

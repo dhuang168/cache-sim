@@ -48,6 +48,14 @@ class MetricsCollector:
     # Queue wait time (microseconds) — time from entering pending queue to slot obtained
     queue_wait_us: list[int] = field(default_factory=list)
 
+    # Prefill duration (microseconds) — actual prefill compute time per request
+    prefill_duration_us: list[int] = field(default_factory=list)
+
+    # Latency impact metrics (time-series, sampled at epoch)
+    slot_utilization_pct: list[float] = field(default_factory=list)
+    l3a_object_count: list[int] = field(default_factory=list)
+    cold_evictions_per_epoch: list[int] = field(default_factory=list)
+
     # Sharing
     tokens_served_from_shared_prefix: int = 0
     total_tokens_served: int = 0
@@ -157,6 +165,16 @@ class MetricsCollector:
                 queue_wait_ms[f"p{p}"] = r(float(np.percentile(self.queue_wait_us, p)) / 1000.0)
             queue_wait_ms["mean"] = r(float(np.mean(self.queue_wait_us)) / 1000.0)
 
+        # Prefill duration stats
+        prefill_duration_ms = {}
+        if self.prefill_duration_us:
+            for p in [50, 95, 99]:
+                prefill_duration_ms[f"p{p}"] = r(float(np.percentile(self.prefill_duration_us, p)) / 1000.0)
+            prefill_duration_ms["mean"] = r(float(np.mean(self.prefill_duration_us)) / 1000.0)
+
+        # Slot utilization
+        mean_slot_util = r(float(np.mean(self.slot_utilization_pct))) if self.slot_utilization_pct else 0.0
+
         # Multi-node dispatch stats
         dispatch_stats = {
             "affinity_dispatches": self.affinity_dispatches,
@@ -178,6 +196,10 @@ class MetricsCollector:
 
         if queue_wait_ms:
             result["queue_wait_ms"] = queue_wait_ms
+
+        if prefill_duration_ms:
+            result["prefill_duration_ms"] = prefill_duration_ms
+            result["mean_slot_utilization_pct"] = mean_slot_util
 
         if self.affinity_dispatches + self.non_affinity_dispatches > 0:
             result["dispatch_stats"] = dispatch_stats

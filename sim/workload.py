@@ -18,10 +18,13 @@ class WorkloadSynthesizer:
         self.config = config
         self.rng = rng
         self._start_time_s = config.sim_start_time_s
-        # Pre-compute per-profile rate constants
+        self._mix_weights: dict[str, float] = dict(config.profile_mix)
+        # Pre-compute per-profile rate constants (scaled by profile_mix weight)
         self._rate_cache: dict[str, tuple[float, float]] = {}
         for p in config.profiles:
-            mean_rate = p.arrival_rate_peak / p.diurnal_peak_trough_ratio
+            mix_w = self._mix_weights.get(p.name, 1.0)
+            scaled_peak = p.arrival_rate_peak * mix_w
+            mean_rate = scaled_peak / p.diurnal_peak_trough_ratio
             amplitude = mean_rate * (p.diurnal_peak_trough_ratio - 1) / 2
             self._rate_cache[p.name] = (mean_rate, amplitude)
 
@@ -93,7 +96,8 @@ class WorkloadSynthesizer:
         Batched: generate multiple exponential samples at once to reduce
         Python loop overhead.
         """
-        rate_max = profile.arrival_rate_peak
+        mix_w = self._mix_weights.get(profile.name, 1.0)
+        rate_max = profile.arrival_rate_peak * mix_w
         inv_rate_max = 1.0 / max(rate_max, 1e-9)
         t = current_time_s
         rng = self.rng
