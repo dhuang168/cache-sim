@@ -23,6 +23,7 @@ import matplotlib.pyplot as plt
 
 from sim.config import SimConfig
 from sim.engine import SimEngine
+from sim.analysis import find_sustaining_qps
 
 CONFIG_PATH = str(Path(__file__).resolve().parent.parent / "configs" / "default.json")
 OUT_DIR = Path(__file__).resolve().parent.parent / "plots"
@@ -445,6 +446,108 @@ def plot_node_scaling():
     print("  ✓ node_scaling.png")
 
 
+# ── Plot 9: TTL sensitivity — Global vs Local L3A ──
+
+def plot_ttl_sensitivity():
+    ttl_l2_values = [1, 5, 10, 20, 60, 120]
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    for l3a_shared, label, color, marker in [
+        (True, "Global L3A", "#2ecc71", "o-"),
+        (False, "Local L3A", "#e67e22", "s--"),
+    ]:
+        hit_rates = []
+        qw_p95s = []
+        for ttl in ttl_l2_values:
+            cfg = stressed_config()
+            cfg.service.n_prefill_nodes = 4
+            cfg.service.l3a_shared = l3a_shared
+            cfg.service.l3a_remote_latency_us = 50_000 if l3a_shared else 0
+            cfg.ttl_l2_s = ttl
+            cfg.seed = 42
+            m = run_sim(cfg)
+            total = max(1, sum(m.savings_events.values()))
+            miss = m.savings_events.get("COLD_MISS", 0) / total
+            hit_rates.append((1 - miss) * 100)
+            qw = float(np.percentile(m.queue_wait_us, 95)) / 1000.0 if m.queue_wait_us else 0.0
+            qw_p95s.append(qw)
+            print(f"    {label} TTL_L2={ttl}s: hit={1-miss:.1%} qw_p95={qw:.0f}ms")
+
+        ax1.plot(ttl_l2_values, hit_rates, marker, linewidth=2, color=color, label=label)
+        ax2.plot(ttl_l2_values, qw_p95s, marker, linewidth=2, color=color, label=label)
+
+    ax1.set_xlabel("L2 TTL (seconds)")
+    ax1.set_ylabel("Cache Hit Rate (%)")
+    ax1.set_title("(c) Hit Rate vs L2 TTL")
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    ax2.set_xlabel("L2 TTL (seconds)")
+    ax2.set_ylabel("Queue Wait p95 (ms)")
+    ax2.set_title("(c) Queue Wait vs L2 TTL")
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+    fig.suptitle("TTL Sensitivity: Global vs Local L3A (4 nodes)", fontsize=13, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.savefig(OUT_DIR / "ttl_sensitivity.png", dpi=150)
+    plt.close(fig)
+    print("  ✓ ttl_sensitivity.png")
+
+
+# ── Plot 10: Sustaining QPS at SLA ──
+
+def plot_sustaining_qps():
+    node_counts = [1, 2, 4, 8]
+    sla_ms = 500.0  # p95 queue wait < 500ms
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for l3a_shared, label, color, marker in [
+        (True, "Global L3A", "#2ecc71", "o-"),
+        (False, "Local L3A", "#e67e22", "s--"),
+    ]:
+        qps_values = []
+        for n in node_counts:
+            cfg = stressed_config()
+            cfg.service.n_prefill_nodes = n
+            cfg.service.l3a_shared = l3a_shared
+            cfg.service.l3a_remote_latency_us = 50_000 if l3a_shared else 0
+            cfg.seed = 42
+
+            mult, report = find_sustaining_qps(
+                cfg, sla_queue_wait_p95_ms=sla_ms,
+                rate_range=(0.1, 5.0), max_iterations=8,
+            )
+            # Compute approximate QPS from multiplier and base rates
+            base_qps = sum(
+                p.arrival_rate_peak * cfg.profile_mix.get(p.name, 0)
+                for p in cfg.profiles
+            )
+            sustaining = mult * base_qps
+            qps_values.append(sustaining)
+            actual_qw = report.get("_queue_wait_p95_ms", 0)
+            print(f"    {label} N={n}: sustaining={sustaining:.0f} qps (mult={mult:.2f}, qw_p95={actual_qw:.0f}ms)")
+
+        ax.plot(node_counts, qps_values, marker, linewidth=2, color=color, label=label)
+
+    ax.set_xlabel("Prefill Nodes")
+    ax.set_ylabel(f"Sustaining QPS (p95 queue wait < {sla_ms:.0f}ms)")
+    ax.set_title("(e) Sustaining QPS at SLA vs Node Count")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Add ideal linear scaling line
+    if qps_values:
+        ax.plot(node_counts, [node_counts[0] * qps_values[0] / node_counts[0] * n for n in node_counts],
+                "k:", alpha=0.3, label="Ideal linear")
+
+    fig.tight_layout()
+    fig.savefig(OUT_DIR / "sustaining_qps.png", dpi=150)
+    plt.close(fig)
+    print("  ✓ sustaining_qps.png")
+
+
 def main():
     # ── Stressed scenario (small L1 forces multi-tier activity) ──
     print("Running stressed simulation (2 GB L1, short TTLs)...")
@@ -477,6 +580,12 @@ def main():
 
     print("\nRunning node-scaling sweep (4 points)...")
     plot_node_scaling()
+
+    print("\nRunning TTL sensitivity sweep...")
+    plot_ttl_sensitivity()
+
+    print("\nRunning sustaining QPS sweep...")
+    plot_sustaining_qps()
 
     print(f"\nAll plots saved to {OUT_DIR}/")
 
