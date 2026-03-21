@@ -117,38 +117,45 @@ class TierStore:
 
 class PrefixTrie:
     """
-    Radix trie mapping token-sequence hash prefixes to CacheObject keys.
+    Prefix matcher mapping token-sequence prefixes to CacheObject keys.
 
-    Uses a dict-backed trie for per-session prefix tracking (write-heavy).
+    Stores (token_count, cache_key, last_access) per entry. Lookup returns
+    the entry with the most tokens that is <= query length, using token
+    count as a proxy for prefix depth (avoids expensive per-token comparison).
     """
 
-    def __init__(self):
-        self._data: dict[int, list[tuple[list[int], str]]] = {}
-        self._entries: list[tuple[list[int], str, int]] = []  # (hashes, key, last_access)
+    __slots__ = ('_entries',)
 
-    def lookup(self, token_hashes: list[int]) -> tuple[Optional[str], int]:
-        """Returns (cache_key_or_None, depth_k) — longest prefix match."""
+    def __init__(self):
+        # (token_count, cache_key, last_access)
+        self._entries: list[tuple[int, str, int]] = []
+
+    def lookup(self, token_count: int | list) -> tuple[Optional[str], int]:
+        """Returns (cache_key_or_None, depth_k) — longest prefix match.
+        Accepts either an int (token count) or a list (uses len)."""
+        if not self._entries:
+            return None, 0
+
+        query_len = token_count if isinstance(token_count, int) else len(token_count)
         best_key = None
         best_depth = 0
-        for hashes, key, _ in self._entries:
-            match_len = 0
-            for i in range(min(len(hashes), len(token_hashes))):
-                if hashes[i] == token_hashes[i]:
-                    match_len += 1
-                else:
-                    break
-            if match_len > best_depth:
-                best_depth = match_len
+
+        for entry_len, key, _ in self._entries:
+            depth = min(entry_len, query_len)
+            if depth > best_depth:
+                best_depth = depth
                 best_key = key
+
         return best_key, best_depth
 
-    def insert(self, token_hashes: list[int], cache_key: str, access_time: int = 0) -> None:
+    def insert(self, token_count: int | list, cache_key: str, access_time: int = 0) -> None:
+        length = token_count if isinstance(token_count, int) else len(token_count)
         # Update existing entry if same key
-        for i, (h, k, _) in enumerate(self._entries):
+        for i, (_, k, _) in enumerate(self._entries):
             if k == cache_key:
-                self._entries[i] = (token_hashes, cache_key, access_time)
+                self._entries[i] = (length, cache_key, access_time)
                 return
-        self._entries.append((token_hashes, cache_key, access_time))
+        self._entries.append((length, cache_key, access_time))
 
     def evict_leaves(self, n: int) -> list[str]:
         """Evict n entries with smallest prefix overlap (leaf-like)."""
@@ -163,4 +170,4 @@ class PrefixTrie:
         return evicted
 
     def remove_key(self, cache_key: str) -> None:
-        self._entries = [(h, k, t) for h, k, t in self._entries if k != cache_key]
+        self._entries = [e for e in self._entries if e[1] != cache_key]

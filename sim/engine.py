@@ -1,6 +1,5 @@
 from __future__ import annotations
 import heapq
-import uuid
 from collections import deque
 from pathlib import Path
 
@@ -33,7 +32,7 @@ class SessionState:
         self.end_us = start_us + duration_us
         self.turn = 0
         self.context_tokens = 0
-        self.token_hashes: list[int] = []
+        self.token_hash_count: int = 0  # length proxy — avoids building large lists
 
 
 class SimEngine:
@@ -85,6 +84,23 @@ class SimEngine:
         self.request_states: dict[str, RequestState] = {}
         self._pending_prefills: deque[tuple] = deque()  # (session_id, request_id, payload)
         self.request_arrival_us: dict[str, int] = {}
+        self._id_counter: int = 0
+
+        # Profile lookup cache (avoid linear scan per request)
+        self._profile_map: dict[str, object] = {p.name: p for p in config.profiles}
+
+        # Dispatch table (built once)
+        self._dispatch_table = {
+            EventType.REQUEST_ARRIVAL: self._on_arrival,
+            EventType.PREFILL_START: self._on_prefill_start,
+            EventType.PREFILL_COMPLETE: self._on_prefill_complete,
+            EventType.DECODE_START: self._on_decode_start,
+            EventType.DECODE_COMPLETE: self._on_decode_complete,
+            EventType.TTL_FIRE: self._on_ttl_fire,
+            EventType.TIER_EVICTION: self._on_tier_eviction,
+            EventType.SESSION_RESUME: self._on_session_resume,
+            EventType.EPOCH_REPORT: self._on_epoch_report,
+        }
 
     def schedule(self, event: Event) -> None:
         assert event.time_us >= self.sim_clock_us, (
@@ -122,18 +138,7 @@ class SimEngine:
         return self.metrics
 
     def _dispatch(self, event: Event, collecting: bool) -> None:
-        handler = {
-            EventType.REQUEST_ARRIVAL: self._on_arrival,
-            EventType.PREFILL_START: self._on_prefill_start,
-            EventType.PREFILL_COMPLETE: self._on_prefill_complete,
-            EventType.DECODE_START: self._on_decode_start,
-            EventType.DECODE_COMPLETE: self._on_decode_complete,
-            EventType.TTL_FIRE: self._on_ttl_fire,
-            EventType.TIER_EVICTION: self._on_tier_eviction,
-            EventType.SESSION_RESUME: self._on_session_resume,
-            EventType.EPOCH_REPORT: self._on_epoch_report,
-        }[event.event_type]
-        handler(event, collecting)
+        self._dispatch_table[event.event_type](event, collecting)
 
     # ─── Arrival and session management ───
 
@@ -146,7 +151,8 @@ class SimEngine:
             self._schedule_next_new_session(profile, 0.0)
 
     def _new_session(self, profile, start_us: int) -> str:
-        session_id = f"sess-{uuid.uuid4().hex[:12]}"
+        self._id_counter += 1
+        session_id = f"s{self._id_counter}"
         dur_s = self.workload.sample_session_duration(profile)
         dur_us = int(dur_s * 1_000_000)
         self.sessions[session_id] = SessionState(
@@ -158,10 +164,7 @@ class SimEngine:
         if profile.shared_system_prefix_tokens > 0:
             sess = self.sessions[session_id]
             sess.context_tokens = profile.shared_system_prefix_tokens
-            sess.token_hashes = [
-                hash((profile.name, "system", i))
-                for i in range(profile.shared_system_prefix_tokens)
-            ]
+            sess.token_hash_count = profile.shared_system_prefix_tokens
         return session_id
 
     def _on_arrival(self, event: Event, collecting: bool) -> None:
@@ -184,7 +187,8 @@ class SimEngine:
             # Session expired or unknown — just drop this request
             return
 
-        request_id = f"req-{uuid.uuid4().hex[:12]}"
+        self._id_counter += 1
+        request_id = f"r{self._id_counter}"
         self.request_states[request_id] = RequestState.QUEUED
         self.request_arrival_us[request_id] = self.sim_clock_us
 
@@ -200,11 +204,8 @@ class SimEngine:
         output_len = self.workload.sample_output_length(profile)
         sess.turn += 1
 
-        # Extend token hashes
-        new_hashes = [
-            hash((session_id, sess.turn, i)) for i in range(input_len)
-        ]
-        sess.token_hashes.extend(new_hashes)
+        # Track token count (PrefixTrie only needs lengths, not actual hashes)
+        sess.token_hash_count += input_len
 
         # Schedule PREFILL_START immediately
         self.schedule(Event(
@@ -273,9 +274,9 @@ class SimEngine:
         hit_tier = None
         hit_key = None
         best_depth = 0
-        if sess and sess.token_hashes:
+        if sess and sess.token_hash_count > 0:
             # Check shared prefix trie
-            sp_key, sp_depth = self.shared_prefix_trie.lookup(sess.token_hashes)
+            sp_key, sp_depth = self.shared_prefix_trie.lookup(sess.token_hash_count)
             if sp_key and sp_depth > 0:
                 sp_obj = self._find_cache_object(sp_key)
                 if sp_obj:
@@ -286,7 +287,7 @@ class SimEngine:
             # Check session trie — prefer if deeper match
             s_trie = self.session_tries.get(session_id)
             if s_trie:
-                s_key, s_depth = s_trie.lookup(sess.token_hashes)
+                s_key, s_depth = s_trie.lookup(sess.token_hash_count)
                 if s_key and s_depth > best_depth:
                     s_obj = self._find_cache_object(s_key)
                     if s_obj:
@@ -456,18 +457,17 @@ class SimEngine:
             )
 
             # Update tries regardless of which tier the object landed in
-            if placed_tier and sess and sess.token_hashes:
+            if placed_tier and sess and sess.token_hash_count > 0:
                 trie = self.session_tries.get(session_id)
                 if trie:
                     trie.insert(
-                        sess.token_hashes[:total_tokens],
+                        total_tokens,
                         cache_key, self.sim_clock_us,
                     )
 
                 # Shared prefix trie
                 if profile.shared_system_prefix_tokens > 0:
                     sp_len = profile.shared_system_prefix_tokens
-                    sp_hashes = sess.token_hashes[:sp_len]
                     sp_key = f"sp-{profile.name}"
 
                     existing_obj = self._find_cache_object(sp_key)
@@ -483,7 +483,7 @@ class SimEngine:
                         )
                         if self._find_cache_object(sp_key):
                             self.shared_prefix_trie.insert(
-                                sp_hashes, sp_key, self.sim_clock_us,
+                                sp_len, sp_key, self.sim_clock_us,
                             )
 
         # FSM: KV_WRITE -> COMPLETE
@@ -793,10 +793,7 @@ class SimEngine:
         self.request_states[request_id] = next_state
 
     def _get_profile(self, name: str):
-        for p in self.config.profiles:
-            if p.name == name:
-                return p
-        return self.config.profiles[0]
+        return self._profile_map.get(name, self.config.profiles[0])
 
     def _find_cache_object(self, key: str) -> CacheObject | None:
         for store in self._tier_stores.values():

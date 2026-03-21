@@ -1,8 +1,11 @@
 from __future__ import annotations
+import math
 import numpy as np
-from scipy.stats import pareto, lognorm, weibull_min
 
 from sim.config import SimConfig, WorkloadProfile
+
+# Pre-computed constants
+_TWO_PI_OVER_86400 = 2.0 * math.pi / 86400.0
 
 
 class WorkloadSynthesizer:
@@ -14,16 +17,21 @@ class WorkloadSynthesizer:
     def __init__(self, config: SimConfig, rng: np.random.Generator):
         self.config = config
         self.rng = rng
+        # Pre-compute per-profile rate constants
+        self._rate_cache: dict[str, tuple[float, float]] = {}
+        for p in config.profiles:
+            mean_rate = p.arrival_rate_peak / p.diurnal_peak_trough_ratio
+            amplitude = mean_rate * (p.diurnal_peak_trough_ratio - 1) / 2
+            self._rate_cache[p.name] = (mean_rate, amplitude)
 
     def diurnal_rate(self, time_s: float, profile: WorkloadProfile) -> float:
         """
         Rate function for NHPP.
         Sinusoidal with period 86400s, peak at 9 AM (offset 32400s).
         """
-        mean_rate = profile.arrival_rate_peak / profile.diurnal_peak_trough_ratio
-        amplitude = mean_rate * (profile.diurnal_peak_trough_ratio - 1) / 2
-        phase = (2 * np.pi * (time_s - 32400)) / 86400
-        return max(0.0, mean_rate + amplitude * np.sin(phase))
+        mean_rate, amplitude = self._rate_cache[profile.name]
+        phase = _TWO_PI_OVER_86400 * (time_s - 32400.0)
+        return max(0.0, mean_rate + amplitude * math.sin(phase))
 
     def sample_iat(self, profile: WorkloadProfile) -> float:
         """Inter-arrival time within a session, in seconds."""
@@ -42,12 +50,10 @@ class WorkloadSynthesizer:
         return max(1, int(self.rng.lognormal(mu, sigma)))
 
     def sample_output_length(self, profile: WorkloadProfile) -> int:
-        """Tokens, Pareto-tailed."""
-        return max(1, int(pareto.rvs(
-            profile.output_len_pareto_alpha,
-            scale=profile.output_len_pareto_xmin,
-            random_state=self.rng,
-        )))
+        """Tokens, Pareto-tailed. Direct numpy instead of scipy.stats.pareto."""
+        # Pareto: x = xmin / U^(1/alpha), where U ~ Uniform(0,1)
+        u = self.rng.random()
+        return max(1, int(profile.output_len_pareto_xmin / u ** (1.0 / profile.output_len_pareto_alpha)))
 
     def sample_session_duration(self, profile: WorkloadProfile) -> float:
         """Session lifetime in seconds."""
@@ -56,9 +62,9 @@ class WorkloadSynthesizer:
                 np.log(profile.session_duration_mean_s) - 0.125,
                 0.5,
             ))
-        return float(weibull_min.rvs(
-            0.8, scale=profile.session_duration_mean_s, random_state=self.rng,
-        ))
+        # Weibull: x = scale * (-ln(U))^(1/k), k=0.8
+        u = self.rng.random()
+        return float(profile.session_duration_mean_s * (-math.log(max(u, 1e-15))) ** (1.0 / 0.8))
 
     def prefix_stability(self, profile: WorkloadProfile, turn: int, total_turns: int) -> float:
         """Fraction of current context that is a stable cached prefix."""
@@ -82,13 +88,21 @@ class WorkloadSynthesizer:
         """
         Thinning algorithm for NHPP.
         Returns next arrival time in seconds.
+
+        Batched: generate multiple exponential samples at once to reduce
+        Python loop overhead.
         """
         rate_max = profile.arrival_rate_peak
+        inv_rate_max = 1.0 / max(rate_max, 1e-9)
         t = current_time_s
+        rng = self.rng
+
+        # Generate candidates in batches of 32
         while True:
-            # Exponential with max rate
-            dt = self.rng.exponential(1.0 / max(rate_max, 1e-9))
-            t += dt
-            rate = self.diurnal_rate(t, profile)
-            if self.rng.random() < rate / max(rate_max, 1e-9):
-                return t
+            dts = rng.exponential(inv_rate_max, size=32)
+            uniforms = rng.random(size=32)
+            for i in range(32):
+                t += dts[i]
+                rate = self.diurnal_rate(t, profile)
+                if uniforms[i] < rate * inv_rate_max:
+                    return t
