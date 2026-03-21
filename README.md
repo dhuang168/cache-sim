@@ -2,6 +2,8 @@
 
 A discrete-event simulator for multi-tier prompt cache systems. It models the full lifecycle of KV cache objects across a three-tier storage hierarchy (L1/L2/L3A) to evaluate caching strategies, eviction policies, and their impact on Time-To-First-Token (TTFT) for LLM inference workloads.
 
+Supports **multi-node prefill dispatch** with per-node L1/L2 caches, shared or local L3A, and push/pull dispatch algorithms with cache-affinity awareness.
+
 ## Architecture
 
 ```
@@ -49,6 +51,36 @@ A discrete-event simulator for multi-tier prompt cache systems. It models the fu
 └────────────────────────────────────────────────────────────┘
 ```
 
+## Multi-Node Architecture
+
+```
+                    ┌──────────────────────┐
+                    │   Central Dispatcher  │
+                    │  (push or pull mode)  │
+                    └──────┬───────────────┘
+                           │
+              ┌────────────┼────────────────┐
+              ▼            ▼                ▼
+        ┌──────────┐ ┌──────────┐    ┌──────────┐
+        │  Node 0  │ │  Node 1  │    │  Node N  │
+        │ L1 (HBM) │ │ L1 (HBM) │    │ L1 (HBM) │
+        │ L2 (DRAM)│ │ L2 (DRAM)│    │ L2 (DRAM)│
+        │ 32 slots │ │ 32 slots │    │ 32 slots │
+        └────┬─────┘ └────┬─────┘    └────┬─────┘
+             └─────────────┼───────────────┘
+                           ▼
+              ┌─────────────────────────┐
+              │  Shared L3A (or local)  │
+              │  Shared Decode Pool     │
+              └─────────────────────────┘
+```
+
+- Each node has its own L1 (HBM) and L2 (DRAM) cache stores
+- L3A can be **shared** (global pool, all nodes access with remote latency) or **local** (per-node, `capacity/N`)
+- **Push dispatch**: cache-affinity-aware routing — prefers nodes with session's KV in local cache
+- **Pull dispatch**: global queue with affinity-scored pulling when slots free up
+- Single-node mode (`n_prefill_nodes=1`) is backward-compatible with the original single-node behavior
+
 ## Key Design Decisions
 
 | Decision | Rationale |
@@ -91,6 +123,9 @@ Four built-in profiles model different inference patterns:
 - **Sharing factor** — total tokens served / unique tokens served
 - **Memory pollution** (internal fragmentation per tier)
 - **GPU queue depths** (prefill and decode)
+- **Queue wait time** — time from entering pending queue to slot obtained (p50/p95/p99)
+- **Multi-node dispatch stats** — affinity dispatches, non-affinity dispatches, cross-node transfers
+- **Per-node metrics** — queue depth, L1/L2 occupancy, and prefill count per node
 
 ## Quick Start
 
@@ -128,14 +163,19 @@ cache_sim/
 │   ├── oracle.py               # Prefill/decode latency oracles
 │   ├── service.py              # GPU slot model (prefill + decode pools)
 │   ├── workload.py             # NHPP workload generator
-│   └── metrics.py              # MetricsCollector and report generation
+│   ├── metrics.py              # MetricsCollector and report generation
+│   ├── node.py                 # PrefillNode — per-node L1/L2/slots state
+│   ├── dispatch.py             # PushDispatcher and PullDispatcher
+│   └── analysis.py             # Sustaining QPS binary search helper
 ├── scripts/
-│   ├── sanity_plots.py         # 7 diagnostic plots
+│   ├── sanity_plots.py         # 10 diagnostic plots (incl. multi-node)
 │   └── sweep.py                # Multi-process parameter sweep
 ├── tests/
 │   ├── test_invariants.py      # 4 boundary-condition invariant tests
 │   ├── test_kv_size.py         # KV size math tests
-│   └── test_oracle.py          # Latency oracle tests
+│   ├── test_oracle.py          # Latency oracle tests
+│   └── test_multinode.py       # 9 multi-node dispatch tests
+├── plan_and_progress/          # Implementation plans and progress reports
 └── pyproject.toml
 ```
 

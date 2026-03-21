@@ -4,7 +4,7 @@ Results from running the full test suite and sanity-check plots against the simu
 
 ## Test Suite Results
 
-**13/13 tests passed** (pytest, Python 3.11, ~10 min total)
+**22/22 tests passed** (pytest, Python 3.11, ~2 min total)
 
 ### Unit Tests
 
@@ -30,6 +30,20 @@ These tests exercise extreme configurations to verify the simulator respects phy
 | `test_infinite_l1_no_evictions` | PASS | L1 capacity = 2^50 bytes produces exactly 0 L1-to-L2 pressure evictions |
 | `test_no_shared_prefix_sharing_factor_one` | PASS | `shared_system_prefix_tokens=0` for all profiles yields `sharing_factor ~= 1.0` |
 | `test_zero_bandwidth_penalty_prefers_restore` | PASS | Infinite bandwidth + zero latency floor produces 0 BREAK_EVEN events (restore is always worthwhile) |
+
+### Multi-Node Tests
+
+| Test | Result | What It Proves |
+|------|--------|----------------|
+| `test_single_node_backward_compat` | PASS | N=1 mode produces valid metrics, no dispatch stats tracked |
+| `test_more_nodes_reduce_queue_pressure` | PASS | 4 nodes → lower per-node queue pressure than 1 node |
+| `test_push_affinity_dispatches` | PASS | Push dispatch achieves cache affinity (affinity_dispatches > 0) |
+| `test_pull_no_starvation` | PASS | Pull mode distributes work to all 4 nodes |
+| `test_pull_affinity_matches` | PASS | Pull mode processes all requests, all nodes active |
+| `test_queue_wait_metric` | PASS | Queue wait metric is populated and non-negative |
+| `test_local_l3a_mode` | PASS | Local L3A mode produces valid metrics |
+| `test_global_vs_local_l3a_hit_rate` | PASS | Global L3A miss rate ≤ local L3A miss rate |
+| `test_multinode_perf_benchmark` | PASS | 10s sim with 4 nodes completes in ~3.5s |
 
 ## Glossary: Savings Classes
 
@@ -82,6 +96,9 @@ All plots saved to `plots/`:
 | Recompute fraction | `recompute_fraction.png` | Distribution of how much of each request must be recomputed |
 | L1 sensitivity | `l1_sensitivity.png` | Stacked bar of hit rates + L1->L2 movement breakdown vs L1 capacity |
 | L2 sensitivity | `l2_sensitivity.png` | TTFT p50/p95 and L2 hit rate vs L2 capacity (2-50 GB) |
+| Node scaling | `node_scaling.png` | 6-panel: hit rate, eviction, queue wait, utilization, TTFT, L3A latency — global vs local L3A across [1,2,4,8] nodes |
+| TTL sensitivity | `ttl_sensitivity.png` | Hit rate and queue wait vs L2 TTL — global vs local L3A at 4 nodes |
+| Sustaining QPS | `sustaining_qps.png` | Max QPS at p95 queue wait < 500ms SLA vs node count — global vs local L3A |
 
 ### Plot Analysis
 

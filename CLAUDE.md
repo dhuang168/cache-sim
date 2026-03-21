@@ -35,6 +35,9 @@ This causes output issues. Run pytest without stderr redirection.
 - **sim/service.py** — `ServiceModel` tracks prefill/decode GPU slot pools with queue backpressure.
 - **sim/metrics.py** — `MetricsCollector` accumulates TTFT, hit rates, evictions, occupancy, sharing factor. `.report()` produces the summary dict.
 - **sim/config.py** — Dataclass-based config loaded from JSON. `SimConfig.from_json()` is the standard entry point.
+- **sim/node.py** — `PrefillNode` class: per-node L1/L2 stores, prefill slots, pending queue, cache affinity check (`has_session_cached()`), queue pressure.
+- **sim/dispatch.py** — `PushDispatcher` (affinity-aware routing) and `PullDispatcher` (global queue with affinity scoring). Push prefers nodes with session's KV cached; pull lets idle nodes pull from a global queue.
+- **sim/analysis.py** — `find_sustaining_qps()` binary search for max arrival rate multiplier at a given SLA threshold (p95 queue wait).
 
 ## Key Design Constraints
 
@@ -56,6 +59,18 @@ These are **mandatory** — must all pass before any exploratory run. They test 
 ### Unit Tests
 - `test_kv_size.py` — KV size math, block allocation, fragmentation
 - `test_oracle.py` — Prefill/decode oracle correctness, transfer time calculation
+
+### Multi-Node Tests (`tests/test_multinode.py`)
+9 tests covering multi-node dispatch:
+1. `test_single_node_backward_compat` — N=1 produces valid metrics, no dispatch tracking
+2. `test_more_nodes_reduce_queue_pressure` — 4 nodes → lower per-node queue pressure than 1 node
+3. `test_push_affinity_dispatches` — 4 nodes → affinity_dispatches > 0
+4. `test_pull_no_starvation` — Pull mode, all 4 nodes get work
+5. `test_pull_affinity_matches` — Pull mode processes requests, all nodes active
+6. `test_queue_wait_metric` — Queue wait samples are populated and non-negative
+7. `test_local_l3a_mode` — Local L3A mode runs and produces valid metrics
+8. `test_global_vs_local_l3a_hit_rate` — Global L3A miss rate ≤ local L3A miss rate
+9. `test_multinode_perf_benchmark` — 10s sim with 4 nodes completes in < 5s
 
 ## Debug History and Lessons Learned
 
@@ -96,6 +111,18 @@ Each invariant test runs a 60s simulation with 5s warmup. This is inherent to th
 
 Uses a "stressed" config: 500 MB L1, 10 GB L2, 50 GB L3A, short TTLs. This forces multi-tier activity and makes the plots informative. The default config has L1 = 80 GB which absorbs most objects without evictions, producing less interesting plots.
 
+Generates 10 plots total:
+1. `tier_occupancy.png` — tier fill levels over time
+2. `ttft_distribution.png` — TTFT violin plots by hit source
+3. `hit_rate_pie.png` — savings class breakdown
+4. `queue_depth.png` — GPU queue utilization
+5. `recompute_fraction.png` — per-request recompute distribution
+6. `l1_sensitivity.png` — hit rate and eviction rate vs L1 capacity
+7. `l2_sensitivity.png` — TTFT and hit rate vs L2 capacity
+8. `node_scaling.png` — 6-panel: hit rate, eviction, queue wait, queue utilization, TTFT, L3A latency sensitivity (global vs local L3A)
+9. `ttl_sensitivity.png` — hit rate and queue wait vs L2 TTL (global vs local L3A)
+10. `sustaining_qps.png` — max QPS at SLA threshold vs node count (global vs local L3A)
+
 ## Metrics: Eviction Types
 
 The simulator distinguishes two types of L1->L2 object movement:
@@ -107,6 +134,21 @@ The simulator distinguishes two types of L1->L2 object movement:
 - **WORTHWHILE**: Restoring cached KV from this tier is faster than recomputing from scratch. Transfer time < recompute time.
 - **BREAK_EVEN**: Restoring from cache takes as long as (or longer than) recomputing. Only applies to L3A hits (SSD latency can exceed recompute cost for small prefills).
 - L2 hits are always WORTHWHILE (DRAM bandwidth makes transfer negligible vs compute).
+
+## Multi-Node Config Fields (`ServiceConfig`)
+
+Added for multi-node prefill dispatch (all have backward-compatible defaults):
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `n_prefill_nodes` | `1` | Number of prefill nodes (each with own L1/L2 and prefill slots) |
+| `dispatch_algorithm` | `"push"` | `"push"` (affinity routing) or `"pull"` (global queue) |
+| `inter_node_latency_us` | `5` | Base cross-node transfer latency |
+| `inter_node_bandwidth_bytes_per_s` | `100_000_000_000` | 100 GB/s (NVLink) |
+| `l3a_shared` | `True` | `True` = global shared L3A; `False` = per-node L3A with `capacity/N` |
+| `l3a_remote_latency_us` | `50_000` | Additional latency for global L3A access (50ms) |
+
+Existing `n_prefill_slots` and `prefill_queue_max` are **per-node**. L1/L2 tier capacities are **per-node**. L3A capacity is **global** when shared, **total** (divided by N) when local.
 
 ## Config Tips
 
