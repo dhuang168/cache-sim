@@ -48,6 +48,12 @@ class ServiceConfig:
     n_decode_slots: int
     prefill_queue_max: int
     decode_queue_max: int
+    n_prefill_nodes: int = 1
+    dispatch_algorithm: str = "push"
+    inter_node_latency_us: int = 5
+    inter_node_bandwidth_bytes_per_s: int = 100_000_000_000  # 100 GB/s NVLink
+    l3a_shared: bool = True
+    l3a_remote_latency_us: int = 50_000  # 50ms for remote/global L3A access
 
 
 @dataclass

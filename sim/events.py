@@ -14,6 +14,7 @@ class EventType(Enum):
     TIER_EVICTION = auto()
     SESSION_RESUME = auto()
     EPOCH_REPORT = auto()
+    NODE_PULL_CHECK = auto()
 
 
 class RequestState(Enum):

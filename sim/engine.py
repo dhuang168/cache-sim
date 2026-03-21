@@ -16,6 +16,8 @@ from sim.workload import WorkloadSynthesizer
 from sim.oracle import PrefillOracle, DecodeOracle, transfer_time_us, is_cache_worthwhile
 from sim.eviction import EvictionEngine
 from sim.metrics import MetricsCollector
+from sim.node import PrefillNode
+from sim.dispatch import PushDispatcher, PullDispatcher
 
 
 # Resolve benchmark table path relative to package
@@ -58,15 +60,67 @@ class SimEngine:
         self.service = ServiceModel(config.service)
         self.metrics = MetricsCollector()
 
-        # Tier stores
-        self._tier_stores: dict[Tier, TierStore] = {}
-        for i, tier_cfg in enumerate(config.tiers):
-            tier_enum = [Tier.L1, Tier.L2, Tier.L3A][i]
-            self._tier_stores[tier_enum] = TierStore(
-                tier_cfg.name, tier_cfg.capacity_bytes, tier_cfg.block_size_bytes
-            )
+        n_nodes = config.service.n_prefill_nodes
+        self._l3a_shared = config.service.l3a_shared
 
-        self.eviction = EvictionEngine(config, self._tier_stores)
+        # L3A setup: shared (global) or per-node (local)
+        l3a_cfg = config.tiers[2]
+        if self._l3a_shared:
+            self._shared_l3a = TierStore(l3a_cfg.name, l3a_cfg.capacity_bytes, l3a_cfg.block_size_bytes)
+        else:
+            self._shared_l3a = None  # no global L3A in local mode
+
+        # Create per-node L1/L2 stores and PrefillNode instances
+        self.nodes: list[PrefillNode] = []
+        for i in range(n_nodes):
+            l1_cfg = config.tiers[0]
+            l2_cfg = config.tiers[1]
+            l1 = TierStore(l1_cfg.name, l1_cfg.capacity_bytes, l1_cfg.block_size_bytes)
+            l2 = TierStore(l2_cfg.name, l2_cfg.capacity_bytes, l2_cfg.block_size_bytes)
+            # Per-node L3A when not shared
+            local_l3a = None
+            if not self._l3a_shared:
+                local_cap = l3a_cfg.capacity_bytes // n_nodes
+                local_l3a = TierStore(l3a_cfg.name, local_cap, l3a_cfg.block_size_bytes)
+            node = PrefillNode(
+                node_id=i,
+                l1_store=l1,
+                l2_store=l2,
+                prefill_slots=config.service.n_prefill_slots,
+                prefill_queue_max=config.service.prefill_queue_max,
+                l3a_store=local_l3a,
+            )
+            self.nodes.append(node)
+
+        # Backward-compat: _tier_stores aliases node[0] L1/L2 + L3A
+        self._tier_stores: dict[Tier, TierStore] = {
+            Tier.L1: self.nodes[0].l1_store,
+            Tier.L2: self.nodes[0].l2_store,
+            Tier.L3A: self._shared_l3a if self._l3a_shared else self.nodes[0].l3a_store,
+        }
+
+        # Per-node eviction engines
+        self._node_eviction: list[EvictionEngine] = []
+        for node in self.nodes:
+            l3a_for_node = self._shared_l3a if self._l3a_shared else node.l3a_store
+            stores = {
+                Tier.L1: node.l1_store,
+                Tier.L2: node.l2_store,
+                Tier.L3A: l3a_for_node,
+            }
+            self._node_eviction.append(EvictionEngine(config, stores))
+
+        # Backward-compat alias
+        self.eviction = self._node_eviction[0]
+
+        # Dispatcher
+        if config.service.dispatch_algorithm == "pull":
+            self.dispatcher = PullDispatcher(self.nodes)
+        else:
+            self.dispatcher = PushDispatcher(self.nodes)
+
+        # Backward-compat: single pending_prefills deque for N=1
+        self._pending_prefills = self.nodes[0].pending_prefills
 
         # Oracles
         table_path = _BENCHMARK_DIR / f"prefill_70b_a100.json"
@@ -82,8 +136,8 @@ class SimEngine:
         # Session tracking
         self.sessions: dict[str, SessionState] = {}
         self.request_states: dict[str, RequestState] = {}
-        self._pending_prefills: deque[tuple] = deque()  # (session_id, request_id, payload)
         self.request_arrival_us: dict[str, int] = {}
+        self._request_queued_at_us: dict[str, int] = {}  # request_id -> time entered pending queue
         self._id_counter: int = 0
 
         # Profile lookup cache (avoid linear scan per request)
@@ -100,6 +154,7 @@ class SimEngine:
             EventType.TIER_EVICTION: self._on_tier_eviction,
             EventType.SESSION_RESUME: self._on_session_resume,
             EventType.EPOCH_REPORT: self._on_epoch_report,
+            EventType.NODE_PULL_CHECK: self._on_node_pull_check,
         }
 
     def schedule(self, event: Event) -> None:
@@ -246,6 +301,54 @@ class SimEngine:
                 payload={"profile": profile.name, "new_session": True},
             ))
 
+    # ─── Node helpers ───
+
+    def _get_node(self, node_id: int) -> PrefillNode:
+        return self.nodes[node_id]
+
+    def _get_node_eviction(self, node_id: int) -> EvictionEngine:
+        return self._node_eviction[node_id]
+
+    def _find_cache_object_with_node(self, key: str) -> tuple[CacheObject | None, int | None]:
+        """Search all node L1s, all node L2s, then L3A.
+        Returns (obj, node_id) for L1/L2 hits; (obj, None) for shared L3A;
+        (obj, node_id) for local L3A hits."""
+        for node in self.nodes:
+            obj = node.l1_store.get(key)
+            if obj:
+                return obj, node.node_id
+            obj = node.l2_store.get(key)
+            if obj:
+                return obj, node.node_id
+        if self._l3a_shared:
+            obj = self._shared_l3a.get(key)
+            if obj:
+                return obj, None
+        else:
+            # Local L3A: search each node's L3A
+            for node in self.nodes:
+                obj = node.l3a_store.get(key)
+                if obj:
+                    return obj, node.node_id
+        return None, None
+
+    def _find_cache_object(self, key: str) -> CacheObject | None:
+        obj, _ = self._find_cache_object_with_node(key)
+        return obj
+
+    def _get_l3a_for_node(self, node_id: int) -> TierStore:
+        """Return the L3A store for a given node (shared or local)."""
+        if self._l3a_shared:
+            return self._shared_l3a
+        return self.nodes[node_id].l3a_store
+
+    def _inter_node_transfer_us(self, size_bytes: int) -> int:
+        """Latency for cross-node transfer (NVLink or similar)."""
+        svc = self.config.service
+        return svc.inter_node_latency_us + int(
+            (size_bytes / svc.inter_node_bandwidth_bytes_per_s) * 1_000_000
+        )
+
     # ─── Prefill ───
 
     def _on_prefill_start(self, event: Event, collecting: bool) -> None:
@@ -270,30 +373,56 @@ class SimEngine:
         cached_tokens = int(total_context * stability)
         uncached_tokens = max(1, total_context - cached_tokens + input_tokens)
 
+        # ─── Dispatch: pick a node ───
+        n_nodes = self.config.service.n_prefill_nodes
+        is_pull = isinstance(self.dispatcher, PullDispatcher)
+
+        if is_pull:
+            # Pull mode: enqueue to global queue, then trigger pulls
+            # But first do cache lookup to populate payload
+            pass  # node assignment happens after cache lookup below
+        else:
+            # Push mode: dispatch to a node
+            node = self.dispatcher.dispatch(session_id, request_id, payload, self.sim_clock_us)
+            payload["node_id"] = node.node_id
+
         # Cache lookup — pick the deepest match across both tries
         hit_tier = None
         hit_key = None
+        hit_node_id = None
         best_depth = 0
         if sess and sess.token_hash_count > 0:
             # Check shared prefix trie
             sp_key, sp_depth = self.shared_prefix_trie.lookup(sess.token_hash_count)
             if sp_key and sp_depth > 0:
-                sp_obj = self._find_cache_object(sp_key)
+                sp_obj, sp_nid = self._find_cache_object_with_node(sp_key)
                 if sp_obj:
                     best_depth = sp_depth
                     hit_key = sp_key
                     hit_tier = sp_obj.tier
+                    hit_node_id = sp_nid
 
             # Check session trie — prefer if deeper match
             s_trie = self.session_tries.get(session_id)
             if s_trie:
                 s_key, s_depth = s_trie.lookup(sess.token_hash_count)
                 if s_key and s_depth > best_depth:
-                    s_obj = self._find_cache_object(s_key)
+                    s_obj, s_nid = self._find_cache_object_with_node(s_key)
                     if s_obj:
                         hit_key = s_key
                         hit_tier = s_obj.tier
+                        hit_node_id = s_nid
                         best_depth = s_depth
+
+        # For push mode, check if hit is on assigned node or remote
+        assigned_node_id = payload.get("node_id", 0)
+
+        # Track affinity dispatch
+        if collecting and n_nodes > 1:
+            if hit_node_id is not None and hit_node_id == assigned_node_id:
+                self.metrics.affinity_dispatches += 1
+            else:
+                self.metrics.non_affinity_dispatches += 1
 
         # Classify hit
         if hit_tier == Tier.L1:
@@ -314,9 +443,25 @@ class SimEngine:
         # Compute prefill latency
         kv_bytes = kv_size_bytes(cached_tokens, self.config.model) if cached_tokens > 0 else 0
 
+        # Cross-node transfer penalty
+        cross_node_penalty_us = 0
+        if (
+            hit_tier in (Tier.L1, Tier.L2)
+            and hit_node_id is not None
+            and hit_node_id != assigned_node_id
+            and n_nodes > 1
+            and kv_bytes > 0
+        ):
+            cross_node_penalty_us = self._inter_node_transfer_us(kv_bytes)
+            if collecting:
+                self.metrics.cross_node_transfers += 1
+
         if hit_tier and hit_tier != Tier.L1 and kv_bytes > 0:
             tier_cfg = self.config.tiers[[Tier.L1, Tier.L2, Tier.L3A].index(hit_tier)]
             t_transfer = transfer_time_us(kv_bytes, tier_cfg)
+            # Add remote latency for global L3A access
+            if hit_tier == Tier.L3A and self._l3a_shared and n_nodes > 1:
+                t_transfer += self.config.service.l3a_remote_latency_us
             worthwhile = is_cache_worthwhile(
                 kv_bytes, tier_cfg, uncached_tokens, self.prefill_oracle
             )
@@ -330,14 +475,16 @@ class SimEngine:
                     cls = "CACHE_HIT_L3A_WORTHWHILE" if worthwhile else "CACHE_HIT_L3A_BREAK_EVEN"
                     self.metrics.savings_events[cls] += 1
 
-            # Prefill time = transfer + remaining uncached prefill
+            # Prefill time = transfer + remaining uncached prefill + cross-node penalty
             prefill_us = t_transfer + self.prefill_oracle.prefill_latency_us(
                 max(1, uncached_tokens)
-            )
+            ) + cross_node_penalty_us
         elif hit_tier == Tier.L1 and kv_bytes > 0:
             if collecting:
                 self.metrics.savings_events["CACHE_HIT_L1"] += 1
-            prefill_us = self.prefill_oracle.prefill_latency_us(max(1, uncached_tokens))
+            prefill_us = self.prefill_oracle.prefill_latency_us(
+                max(1, uncached_tokens)
+            ) + cross_node_penalty_us
         else:
             if collecting:
                 self.metrics.savings_events["COLD_MISS"] += 1
@@ -354,7 +501,7 @@ class SimEngine:
         if collecting and total_tokens > 0:
             self.metrics.recompute_fraction.append(uncached_tokens / total_tokens)
 
-        # Try to admit to prefill pool
+        # FSM: -> PREFILLING
         self._transition(request_id, RequestState.PREFILLING)
 
         payload["uncached_tokens"] = uncached_tokens
@@ -363,19 +510,53 @@ class SimEngine:
         payload["ttft_component"] = ttft_component
         payload["hit_key"] = hit_key
 
-        if self.service.prefill_slots_free > 0:
-            self.service.prefill_slots_free -= 1
-            self.schedule(Event(
-                time_us=self.sim_clock_us + prefill_us, seq=0,
-                event_type=EventType.PREFILL_COMPLETE,
-                session_id=event.session_id,
-                request_id=request_id,
-                payload=payload,
-            ))
-        elif len(self._pending_prefills) < self.config.service.prefill_queue_max:
-            # Queue the prefill — will be scheduled when a slot frees up
-            self._pending_prefills.append((event.session_id, request_id, payload))
-        # If queue is also full, request is dropped (backpressure)
+        if is_pull:
+            # Pull mode: assign to node via pull, or enqueue to global queue
+            assigned = False
+            for node in self.nodes:
+                if node.prefill_slots_free > 0:
+                    payload["node_id"] = node.node_id
+                    node.prefill_slots_free -= 1
+                    completion_us = self.sim_clock_us + prefill_us
+                    node.add_completion(completion_us)
+                    if collecting:
+                        self.metrics.per_node_prefill_count[node.node_id] += 1
+                        self.metrics.queue_wait_us.append(0)  # immediate slot
+                    self.schedule(Event(
+                        time_us=completion_us, seq=0,
+                        event_type=EventType.PREFILL_COMPLETE,
+                        session_id=event.session_id,
+                        request_id=request_id,
+                        payload=payload,
+                    ))
+                    assigned = True
+                    break
+            if not assigned:
+                self._request_queued_at_us[request_id] = self.sim_clock_us
+                self.dispatcher.enqueue(
+                    event.session_id, request_id, payload, self.sim_clock_us,
+                )
+        else:
+            # Push mode: use assigned node
+            node = self._get_node(assigned_node_id)
+            if node.prefill_slots_free > 0:
+                node.prefill_slots_free -= 1
+                completion_us = self.sim_clock_us + prefill_us
+                node.add_completion(completion_us)
+                if collecting:
+                    self.metrics.per_node_prefill_count[node.node_id] += 1
+                    self.metrics.queue_wait_us.append(0)  # immediate slot
+                self.schedule(Event(
+                    time_us=completion_us, seq=0,
+                    event_type=EventType.PREFILL_COMPLETE,
+                    session_id=event.session_id,
+                    request_id=request_id,
+                    payload=payload,
+                ))
+            elif len(node.pending_prefills) < node.prefill_queue_max:
+                self._request_queued_at_us[request_id] = self.sim_clock_us
+                node.pending_prefills.append((event.session_id, request_id, payload))
+            # If queue is also full, request is dropped (backpressure)
 
     def _on_prefill_complete(self, event: Event, collecting: bool) -> None:
         request_id = event.request_id
@@ -400,9 +581,20 @@ class SimEngine:
                 shared_contribution = min(cached, profile.shared_system_prefix_tokens)
                 self.metrics.tokens_served_from_shared_prefix += shared_contribution
 
-        # Free the prefill slot and drain pending queue
-        self.service.prefill_slots_free += 1
-        self._drain_pending_prefills()
+        # Free the prefill slot on the specific node and drain
+        node_id = payload.get("node_id", 0)
+        node = self._get_node(node_id)
+        node.prefill_slots_free += 1
+
+        # Remove completion time
+        completion_us = event.time_us
+        node.remove_completion(completion_us)
+
+        # Drain pending
+        if isinstance(self.dispatcher, PullDispatcher):
+            self._pull_drain_node(node, collecting)
+        else:
+            self._push_drain_node(node, collecting)
 
         # Try to move to decode
         decode_event = self.service.complete_prefill(event, self.sim_clock_us)
@@ -411,7 +603,59 @@ class SimEngine:
             self.schedule(decode_event)
         else:
             if collecting:
-                self.metrics.prefill_slot_blocked_us += 1  # will accumulate in epoch
+                self.metrics.prefill_slot_blocked_us += 1
+
+    def _push_drain_node(self, node: PrefillNode, collecting: bool) -> None:
+        """Drain pending prefills from a node's local queue (push mode)."""
+        while node.pending_prefills and node.prefill_slots_free > 0:
+            session_id, request_id, payload = node.pending_prefills.popleft()
+            node.prefill_slots_free -= 1
+            prefill_us = payload.get("prefill_us", 0)
+            completion_us = self.sim_clock_us + prefill_us
+            node.add_completion(completion_us)
+            if collecting:
+                self.metrics.per_node_prefill_count[node.node_id] += 1
+                queued_at = self._request_queued_at_us.pop(request_id, None)
+                if queued_at is not None:
+                    self.metrics.queue_wait_us.append(self.sim_clock_us - queued_at)
+            self.schedule(Event(
+                time_us=completion_us, seq=0,
+                event_type=EventType.PREFILL_COMPLETE,
+                session_id=session_id,
+                request_id=request_id,
+                payload=payload,
+            ))
+
+    def _pull_drain_node(self, node: PrefillNode, collecting: bool) -> None:
+        """Pull jobs from global queue for this node (pull mode)."""
+        while node.prefill_slots_free > 0:
+            job = self.dispatcher.pull(node, self.sim_clock_us)
+            if job is None:
+                break
+            session_id, request_id, payload = job
+            payload["node_id"] = node.node_id
+            node.prefill_slots_free -= 1
+            prefill_us = payload.get("prefill_us", 0)
+            completion_us = self.sim_clock_us + prefill_us
+            node.add_completion(completion_us)
+            if collecting:
+                self.metrics.per_node_prefill_count[node.node_id] += 1
+                queued_at = self._request_queued_at_us.pop(request_id, None)
+                if queued_at is not None:
+                    self.metrics.queue_wait_us.append(self.sim_clock_us - queued_at)
+            self.schedule(Event(
+                time_us=completion_us, seq=0,
+                event_type=EventType.PREFILL_COMPLETE,
+                session_id=session_id,
+                request_id=request_id,
+                payload=payload,
+            ))
+
+    def _on_node_pull_check(self, event: Event, collecting: bool) -> None:
+        """Handle pull check event for a specific node."""
+        node_id = (event.payload or {}).get("node_id", 0)
+        node = self._get_node(node_id)
+        self._pull_drain_node(node, collecting)
 
     # ─── Decode ───
 
@@ -445,6 +689,7 @@ class SimEngine:
         total_ctx = payload.get("total_context", 0)
         output_tokens = payload.get("output_tokens", 0)
         total_tokens = total_ctx + output_tokens
+        node_id = payload.get("node_id", 0)
 
         if total_tokens > 0:
             size = kv_size_bytes(total_tokens, self.config.model)
@@ -454,6 +699,7 @@ class SimEngine:
 
             placed_tier = self._place_kv_object(
                 cache_key, session_id, profile, size, total_tokens, collecting,
+                node_id=node_id,
             )
 
             # Update tries regardless of which tier the object landed in
@@ -480,6 +726,7 @@ class SimEngine:
                             sp_key, "__shared__", profile,
                             sp_size, sp_len, collecting,
                             shared_prefix_id=profile.name,
+                            node_id=node_id,
                         )
                         if self._find_cache_object(sp_key):
                             self.shared_prefix_trie.insert(
@@ -505,17 +752,19 @@ class SimEngine:
         payload = event.payload or {}
         cache_key = payload.get("cache_key", "")
         target = payload.get("target", "")
+        node_id = payload.get("node_id", 0)
+        node = self._get_node(node_id)
+        eviction = self._get_node_eviction(node_id)
 
         if target == "l2_hibernate":
-            # Check if the object is still in L1 and hasn't been accessed recently
-            l1 = self._tier_stores[Tier.L1]
+            # Check if the object is still in the node's L1
+            l1 = node.l1_store
             obj = l1.get(cache_key)
             if obj is None:
                 return  # Already evicted or moved
 
             ttl_us = int(self.config.ttl_l2_s * 1_000_000)
             if self.sim_clock_us - obj.last_accessed_at_us < ttl_us:
-                # Was accessed since TTL was set; reschedule
                 remaining = ttl_us - (self.sim_clock_us - obj.last_accessed_at_us)
                 self.schedule(Event(
                     time_us=self.sim_clock_us + remaining, seq=0,
@@ -525,22 +774,19 @@ class SimEngine:
                 ))
                 return
 
-            # Move L1 -> L2
-            evicted = self.eviction.evict_l1_to_l2(0)  # just move this one
-            # Actually, directly move this specific object
+            # Move L1 -> L2 (node-local)
             l1_obj = l1.remove(cache_key)
             if l1_obj:
-                l2 = self._tier_stores[Tier.L2]
+                l2 = node.l2_store
                 n_blocks = allocated_blocks(l1_obj.size_bytes, l2.block_size_bytes)
                 l1_obj.tier = Tier.L2
                 l1_obj.block_count = n_blocks
                 l1_obj.block_layout = TIER_TO_LAYOUT[Tier.L2]
 
                 if not l2.can_fit(l1_obj.size_bytes):
-                    # Evict from L2 to L3a
-                    expired = self.eviction.find_ttl_expired_l2(self.sim_clock_us)
+                    expired = eviction.find_ttl_expired_l2(self.sim_clock_us)
                     for ek in expired:
-                        self.eviction.hibernate_l2_to_l3a(ek)
+                        eviction.hibernate_l2_to_l3a(ek)
                         if collecting:
                             self.metrics.l2_to_l3a_evictions += 1
 
@@ -551,7 +797,7 @@ class SimEngine:
 
                     # If L2 TTL is 0, immediately hibernate to L3A
                     if self.config.ttl_l2_s <= 0:
-                        self.eviction.hibernate_l2_to_l3a(cache_key)
+                        eviction.hibernate_l2_to_l3a(cache_key)
                         if collecting:
                             self.metrics.l2_to_l3a_evictions += 1
                         return
@@ -562,11 +808,11 @@ class SimEngine:
                         time_us=self.sim_clock_us + l3a_ttl_us, seq=0,
                         event_type=EventType.TTL_FIRE,
                         session_id=event.session_id,
-                        payload={"cache_key": cache_key, "target": "l3a_hibernate"},
+                        payload={"cache_key": cache_key, "target": "l3a_hibernate", "node_id": node_id},
                     ))
 
         elif target == "l3a_hibernate":
-            l2 = self._tier_stores[Tier.L2]
+            l2 = node.l2_store
             obj = l2.get(cache_key)
             if obj is None:
                 return
@@ -582,22 +828,21 @@ class SimEngine:
                 ))
                 return
 
-            success = self.eviction.hibernate_l2_to_l3a(cache_key)
+            success = eviction.hibernate_l2_to_l3a(cache_key)
             if collecting and success:
                 self.metrics.l2_to_l3a_evictions += 1
 
     def _on_tier_eviction(self, event: Event, collecting: bool) -> None:
         """Handle explicit tier eviction events (L3a cleanup)."""
-        if self.eviction.needs_l3a_cleanup():
-            evicted = self.eviction.cleanup_l3a(
-                self._tier_stores[Tier.L3A].block_size_bytes
-            )
-            if collecting:
-                self.metrics.session_cold_evictions += len(evicted)
+        for node_id, eviction in enumerate(self._node_eviction):
+            if eviction.needs_l3a_cleanup():
+                l3a = self._get_l3a_for_node(node_id)
+                evicted = eviction.cleanup_l3a(l3a.block_size_bytes)
+                if collecting:
+                    self.metrics.session_cold_evictions += len(evicted)
 
     def _on_session_resume(self, event: Event, collecting: bool) -> None:
         """Handle session resume from cache."""
-        # Session resume is handled by the normal arrival + cache lookup path
         pass
 
     # ─── Epoch reporting ───
@@ -606,64 +851,112 @@ class SimEngine:
         if not collecting:
             return
 
-        # Record tier occupancy
-        for tier_enum, store in self._tier_stores.items():
-            self.metrics.tier_occupancy_pct[store.name].append(
-                store.occupancy_pct * 100.0
+        # Record per-node and aggregate tier occupancy
+        agg_l1_used = 0
+        agg_l1_cap = 0
+        agg_l2_used = 0
+        agg_l2_cap = 0
+        for node in self.nodes:
+            l1_occ = node.l1_store.occupancy_pct * 100.0
+            l2_occ = node.l2_store.occupancy_pct * 100.0
+            self.metrics.per_node_l1_occupancy_pct[node.node_id].append(l1_occ)
+            self.metrics.per_node_l2_occupancy_pct[node.node_id].append(l2_occ)
+            self.metrics.per_node_queue_depth[node.node_id].append(len(node.pending_prefills))
+            agg_l1_used += node.l1_store.used_bytes
+            agg_l1_cap += node.l1_store.capacity_bytes
+            agg_l2_used += node.l2_store.used_bytes
+            agg_l2_cap += node.l2_store.capacity_bytes
+
+        # Aggregate L1/L2 occupancy across all nodes
+        self.metrics.tier_occupancy_pct["L1"].append(
+            (agg_l1_used / agg_l1_cap * 100.0) if agg_l1_cap > 0 else 0.0
+        )
+        self.metrics.tier_occupancy_pct["L2"].append(
+            (agg_l2_used / agg_l2_cap * 100.0) if agg_l2_cap > 0 else 0.0
+        )
+        if self._l3a_shared:
+            self.metrics.tier_occupancy_pct["L3A"].append(
+                self._shared_l3a.occupancy_pct * 100.0
+            )
+        else:
+            agg_l3a_used = sum(n.l3a_store.used_bytes for n in self.nodes)
+            agg_l3a_cap = sum(n.l3a_store.capacity_bytes for n in self.nodes)
+            self.metrics.tier_occupancy_pct["L3A"].append(
+                (agg_l3a_used / agg_l3a_cap * 100.0) if agg_l3a_cap > 0 else 0.0
             )
 
-        # Record queue depths
-        self.metrics.prefill_queue_depth.append(len(self._pending_prefills))
+        # Record queue depths (aggregate)
+        total_pending = sum(len(n.pending_prefills) for n in self.nodes)
+        if isinstance(self.dispatcher, PullDispatcher):
+            total_pending += len(self.dispatcher.global_queue)
+        self.metrics.prefill_queue_depth.append(total_pending)
         self.metrics.decode_queue_depth.append(len(self.service.decode_queue))
 
         # Record memory pollution
-        for tier_enum, store in self._tier_stores.items():
-            self.metrics.memory_pollution_bytes[store.name] = store.fragmentation_bytes()
+        agg_l1_frag = sum(n.l1_store.fragmentation_bytes() for n in self.nodes)
+        agg_l2_frag = sum(n.l2_store.fragmentation_bytes() for n in self.nodes)
+        self.metrics.memory_pollution_bytes["L1"] = agg_l1_frag
+        self.metrics.memory_pollution_bytes["L2"] = agg_l2_frag
+        if self._l3a_shared:
+            self.metrics.memory_pollution_bytes["L3A"] = self._shared_l3a.fragmentation_bytes()
+        else:
+            self.metrics.memory_pollution_bytes["L3A"] = sum(
+                n.l3a_store.fragmentation_bytes() for n in self.nodes
+            )
 
         # Accumulate prefill blocked time
         self.metrics.prefill_slot_blocked_us += self.service.get_blocked_us(self.sim_clock_us)
 
-        # Run TTL checks for L2 -> L3a hibernation
-        expired_l2 = self.eviction.find_ttl_expired_l2(self.sim_clock_us)
-        for key in expired_l2:
-            self.eviction.hibernate_l2_to_l3a(key)
-            self.metrics.l2_to_l3a_evictions += 1
+        # Run TTL and eviction checks per node
+        for node_id, node in enumerate(self.nodes):
+            eviction = self._node_eviction[node_id]
 
-        # Run TTL checks for L3a — only evict objects whose session has ended
-        expired_l3a = self.eviction.find_ttl_expired_l3a(self.sim_clock_us)
-        for key in expired_l3a:
-            obj = self._tier_stores[Tier.L3A].get(key)
-            if obj and obj.session_id != "__shared__":
-                sess = self.sessions.get(obj.session_id)
-                if sess and self.sim_clock_us <= sess.end_us:
-                    continue  # Session still alive — keep the object
-            self._tier_stores[Tier.L3A].remove(key)
-            self.metrics.session_cold_evictions += 1
+            # L2 -> L3a hibernation
+            expired_l2 = eviction.find_ttl_expired_l2(self.sim_clock_us)
+            for key in expired_l2:
+                eviction.hibernate_l2_to_l3a(key)
+                self.metrics.l2_to_l3a_evictions += 1
 
-        # L1 pressure check
-        if self.eviction.needs_l1_eviction():
-            l1 = self._tier_stores[Tier.L1]
-            target = int(l1.capacity_bytes * self.config.eviction_hbm_threshold * 0.9)
-            to_free = l1.used_bytes - target
-            if to_free > 0:
-                evicted = self.eviction.evict_l1_to_l2(to_free)
-                self.metrics.l1_to_l2_evictions += len(evicted)
+            # L1 pressure check
+            if eviction.needs_l1_eviction():
+                l1 = node.l1_store
+                target = int(l1.capacity_bytes * self.config.eviction_hbm_threshold * 0.9)
+                to_free = l1.used_bytes - target
+                if to_free > 0:
+                    evicted = eviction.evict_l1_to_l2(to_free)
+                    self.metrics.l1_to_l2_evictions += len(evicted)
+
+        # L3a TTL checks
+        if self._l3a_shared:
+            expired_l3a = self._node_eviction[0].find_ttl_expired_l3a(self.sim_clock_us)
+            for key in expired_l3a:
+                obj = self._shared_l3a.get(key)
+                if obj and obj.session_id != "__shared__":
+                    sess = self.sessions.get(obj.session_id)
+                    if sess and self.sim_clock_us <= sess.end_us:
+                        continue
+                self._shared_l3a.remove(key)
+                self.metrics.session_cold_evictions += 1
+        else:
+            for node_id, node in enumerate(self.nodes):
+                eviction = self._node_eviction[node_id]
+                expired_l3a = eviction.find_ttl_expired_l3a(self.sim_clock_us)
+                for key in expired_l3a:
+                    obj = node.l3a_store.get(key)
+                    if obj and obj.session_id != "__shared__":
+                        sess = self.sessions.get(obj.session_id)
+                        if sess and self.sim_clock_us <= sess.end_us:
+                            continue
+                    node.l3a_store.remove(key)
+                    self.metrics.session_cold_evictions += 1
 
     # ─── Helpers ───
 
     def _drain_pending_prefills(self) -> None:
-        """Schedule pending prefills when prefill slots become available."""
-        while self._pending_prefills and self.service.prefill_slots_free > 0:
-            session_id, request_id, payload = self._pending_prefills.popleft()
-            self.service.prefill_slots_free -= 1
-            prefill_us = payload.get("prefill_us", 0)
-            self.schedule(Event(
-                time_us=self.sim_clock_us + prefill_us, seq=0,
-                event_type=EventType.PREFILL_COMPLETE,
-                session_id=session_id,
-                request_id=request_id,
-                payload=payload,
-            ))
+        """Backward-compat: drain node[0]'s pending queue."""
+        node = self.nodes[0]
+        collecting = self.sim_clock_us >= int(self.config.warmup_s * 1_000_000)
+        self._push_drain_node(node, collecting)
 
     def _place_kv_object(
         self,
@@ -674,20 +967,24 @@ class SimEngine:
         total_tokens: int,
         collecting: bool,
         shared_prefix_id: str | None = None,
+        node_id: int = 0,
     ) -> Tier | None:
         """
-        Try to place a KV object into L1; if it doesn't fit, fall through
-        to L2 (then L3A). Returns the tier it was placed in, or None.
+        Try to place a KV object into the target node's L1; if it doesn't fit,
+        fall through to that node's L2, then to shared L3A.
         """
         if shared_prefix_id is None and profile.shared_system_prefix_tokens > 0:
             sp_id = profile.name
         else:
             sp_id = shared_prefix_id
 
-        # Try L1
-        l1 = self._tier_stores[Tier.L1]
+        node = self._get_node(node_id)
+        eviction = self._get_node_eviction(node_id)
+
+        # Try node's L1
+        l1 = node.l1_store
         if not l1.can_fit(size):
-            evicted = self.eviction.evict_l1_to_l2(
+            evicted = eviction.evict_l1_to_l2(
                 allocated_blocks(size, l1.block_size_bytes) * l1.block_size_bytes
             )
             if collecting:
@@ -716,16 +1013,16 @@ class SimEngine:
                     time_us=self.sim_clock_us + ttl_us, seq=0,
                     event_type=EventType.TTL_FIRE,
                     session_id=session_id,
-                    payload={"cache_key": cache_key, "target": "l2_hibernate"},
+                    payload={"cache_key": cache_key, "target": "l2_hibernate", "node_id": node_id},
                 ))
             return Tier.L1
 
-        # L1 too small — try L2 directly
-        l2 = self._tier_stores[Tier.L2]
+        # L1 too small — try node's L2
+        l2 = node.l2_store
         if not l2.can_fit(size):
-            expired = self.eviction.find_ttl_expired_l2(self.sim_clock_us)
+            expired = eviction.find_ttl_expired_l2(self.sim_clock_us)
             for ek in expired:
-                self.eviction.hibernate_l2_to_l3a(ek)
+                eviction.hibernate_l2_to_l3a(ek)
                 if collecting:
                     self.metrics.l2_to_l3a_evictions += 1
 
@@ -752,14 +1049,14 @@ class SimEngine:
                     time_us=self.sim_clock_us + ttl_us, seq=0,
                     event_type=EventType.TTL_FIRE,
                     session_id=session_id,
-                    payload={"cache_key": cache_key, "target": "l3a_hibernate"},
+                    payload={"cache_key": cache_key, "target": "l3a_hibernate", "node_id": node_id},
                 ))
             return Tier.L2
 
-        # L2 too small — try L3A
-        l3a = self._tier_stores[Tier.L3A]
+        # L2 too small — try L3A (shared or local)
+        l3a = self._get_l3a_for_node(node_id)
         if not l3a.can_fit(size):
-            evicted = self.eviction.cleanup_l3a(
+            evicted = eviction.cleanup_l3a(
                 allocated_blocks(size, l3a.block_size_bytes) * l3a.block_size_bytes
             )
             if collecting:
@@ -784,7 +1081,7 @@ class SimEngine:
             l3a.insert(cache_key, obj)
             return Tier.L3A
 
-        return None  # Couldn't place anywhere
+        return None
 
     def _transition(self, request_id: str, next_state: RequestState) -> None:
         current = self.request_states.get(request_id)
@@ -794,10 +1091,3 @@ class SimEngine:
 
     def _get_profile(self, name: str):
         return self._profile_map.get(name, self.config.profiles[0])
-
-    def _find_cache_object(self, key: str) -> CacheObject | None:
-        for store in self._tier_stores.values():
-            obj = store.get(key)
-            if obj:
-                return obj
-        return None

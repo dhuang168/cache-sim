@@ -285,6 +285,166 @@ def plot_l1_sensitivity():
     print("  ✓ l1_sensitivity.png")
 
 
+# ── Plot 8: Node-scaling — Global vs Local L3A ──
+
+def _collect_node_scaling_data(node_counts, l3a_shared, label):
+    """Run sims for each node count and collect metrics."""
+    results = []
+    for n in node_counts:
+        cfg = stressed_config()
+        cfg.service.n_prefill_nodes = n
+        cfg.service.dispatch_algorithm = "push"
+        cfg.service.l3a_shared = l3a_shared
+        cfg.service.l3a_remote_latency_us = 50_000 if l3a_shared else 0
+        cfg.seed = 42
+        m = run_sim(cfg)
+
+        total_events = max(1, sum(m.savings_events.values()))
+        eff_s = max(1, m.effective_sim_us) / 1e6
+
+        # Queue utilization %
+        q = m.prefill_queue_depth
+        total_queue_max = n * cfg.service.prefill_queue_max
+        queue_util = (np.mean(q) / total_queue_max * 100) if q and total_queue_max > 0 else 0.0
+
+        # Hit rate breakdown
+        l1_hit = m.savings_events.get("CACHE_HIT_L1", 0) / total_events
+        l2_hit = m.savings_events.get("CACHE_HIT_L2_WORTHWHILE", 0) / total_events
+        l3a_hit = (m.savings_events.get("CACHE_HIT_L3A_WORTHWHILE", 0) +
+                   m.savings_events.get("CACHE_HIT_L3A_BREAK_EVEN", 0)) / total_events
+        miss_rate = m.savings_events.get("COLD_MISS", 0) / total_events
+
+        # Queue wait p95
+        qw_p95 = float(np.percentile(m.queue_wait_us, 95)) / 1000.0 if m.queue_wait_us else 0.0
+
+        # Eviction rate
+        evict_rate = (m.l1_to_l2_evictions + m.l2_to_l3a_evictions) / eff_s
+
+        # TTFT p95 decomposed: queue_wait + compute
+        all_ttft = []
+        for src in ["L1_hit", "L2_hit", "L3A_hit", "cold_miss"]:
+            all_ttft.extend(m.ttft_us.get(src, []))
+        ttft_p95 = float(np.percentile(all_ttft, 95)) / 1000.0 if all_ttft else 0.0
+
+        results.append({
+            "n": n,
+            "queue_util_pct": queue_util,
+            "hit_rate": 1.0 - miss_rate,
+            "l1_hit": l1_hit, "l2_hit": l2_hit, "l3a_hit": l3a_hit, "miss": miss_rate,
+            "qw_p95_ms": qw_p95,
+            "ttft_p95_ms": ttft_p95,
+            "evict_rate": evict_rate,
+        })
+        print(f"    {label} N={n}: hit={1-miss_rate:.1%} qw_p95={qw_p95:.0f}ms ttft_p95={ttft_p95:.0f}ms")
+    return results
+
+
+def plot_node_scaling():
+    node_counts = [1, 2, 4, 8]
+
+    print("  Collecting global L3A data...")
+    global_data = _collect_node_scaling_data(node_counts, l3a_shared=True, label="Global")
+    print("  Collecting local L3A data...")
+    local_data = _collect_node_scaling_data(node_counts, l3a_shared=False, label="Local")
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+
+    # Panel 1: Cache hit rate breakdown (global vs local)
+    ax = axes[0, 0]
+    g_hit = [d["hit_rate"] * 100 for d in global_data]
+    l_hit = [d["hit_rate"] * 100 for d in local_data]
+    ax.plot(node_counts, g_hit, "o-", linewidth=2, color="#2ecc71", label="Global L3A")
+    ax.plot(node_counts, l_hit, "s--", linewidth=2, color="#e67e22", label="Local L3A")
+    ax.set_xlabel("Prefill Nodes")
+    ax.set_ylabel("Cache Hit Rate (%)")
+    ax.set_title("(b) Cache Hit Rate")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Panel 2: Per-node eviction rate
+    ax = axes[0, 1]
+    g_evict = [d["evict_rate"] / d["n"] for d in global_data]
+    l_evict = [d["evict_rate"] / d["n"] for d in local_data]
+    ax.plot(node_counts, g_evict, "o-", linewidth=2, color="#2ecc71", label="Global L3A")
+    ax.plot(node_counts, l_evict, "s--", linewidth=2, color="#e67e22", label="Local L3A")
+    ax.set_xlabel("Prefill Nodes")
+    ax.set_ylabel("Evictions/s per Node")
+    ax.set_title("(a) Per-Node Eviction Rate")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Panel 3: Queue wait p95
+    ax = axes[0, 2]
+    g_qw = [d["qw_p95_ms"] for d in global_data]
+    l_qw = [d["qw_p95_ms"] for d in local_data]
+    ax.plot(node_counts, g_qw, "o-", linewidth=2, color="#2ecc71", label="Global L3A")
+    ax.plot(node_counts, l_qw, "s--", linewidth=2, color="#e67e22", label="Local L3A")
+    ax.set_xlabel("Prefill Nodes")
+    ax.set_ylabel("Queue Wait p95 (ms)")
+    ax.set_title("(d) Queue Wait p95")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Panel 4: Queue utilization %
+    ax = axes[1, 0]
+    g_qu = [d["queue_util_pct"] for d in global_data]
+    l_qu = [d["queue_util_pct"] for d in local_data]
+    ax.plot(node_counts, g_qu, "o-", linewidth=2, color="#2ecc71", label="Global L3A")
+    ax.plot(node_counts, l_qu, "s--", linewidth=2, color="#e67e22", label="Local L3A")
+    ax.set_xlabel("Prefill Nodes")
+    ax.set_ylabel("Queue Utilization (%)")
+    ax.set_title("Queue Utilization vs Node Count")
+    ax.set_ylim(0, 105)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Panel 5: TTFT p95 (total = queue wait + compute)
+    ax = axes[1, 1]
+    g_ttft = [d["ttft_p95_ms"] for d in global_data]
+    l_ttft = [d["ttft_p95_ms"] for d in local_data]
+    ax.plot(node_counts, g_ttft, "o-", linewidth=2, color="#2ecc71", label="Global L3A")
+    ax.plot(node_counts, l_ttft, "s--", linewidth=2, color="#e67e22", label="Local L3A")
+    ax.set_xlabel("Prefill Nodes")
+    ax.set_ylabel("TTFT p95 (ms)")
+    ax.set_title("(d) TTFT p95 vs Node Count")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Panel 6: L3A latency sensitivity (fixed 4 nodes)
+    ax = axes[1, 2]
+    latencies_ms = [0, 10, 25, 50, 75, 100]
+    ttft_at_lat = []
+    hit_at_lat = []
+    for lat_ms in latencies_ms:
+        cfg = stressed_config()
+        cfg.service.n_prefill_nodes = 4
+        cfg.service.l3a_shared = True
+        cfg.service.l3a_remote_latency_us = lat_ms * 1000
+        cfg.seed = 42
+        m = run_sim(cfg)
+        all_ttft = []
+        for src in ["L1_hit", "L2_hit", "L3A_hit", "cold_miss"]:
+            all_ttft.extend(m.ttft_us.get(src, []))
+        p95 = float(np.percentile(all_ttft, 95)) / 1000.0 if all_ttft else 0.0
+        ttft_at_lat.append(p95)
+        total_ev = max(1, sum(m.savings_events.values()))
+        miss = m.savings_events.get("COLD_MISS", 0) / total_ev
+        hit_at_lat.append((1 - miss) * 100)
+        print(f"    L3A latency={lat_ms}ms: ttft_p95={p95:.0f}ms hit={1-miss:.1%}")
+
+    ax.plot(latencies_ms, ttft_at_lat, "o-", linewidth=2, color="#3498db", label="TTFT p95")
+    ax.set_xlabel("Global L3A Remote Latency (ms)")
+    ax.set_ylabel("TTFT p95 (ms)")
+    ax.set_title("(f) L3A Latency Sensitivity (4 nodes)")
+    ax.grid(True, alpha=0.3)
+
+    fig.suptitle("Multi-Node Scaling: Global vs Local L3A", fontsize=14, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.savefig(OUT_DIR / "node_scaling.png", dpi=150)
+    plt.close(fig)
+    print("  ✓ node_scaling.png")
+
+
 def main():
     # ── Stressed scenario (small L1 forces multi-tier activity) ──
     print("Running stressed simulation (2 GB L1, short TTLs)...")
@@ -314,6 +474,9 @@ def main():
 
     print("\nRunning L2 capacity sweep (5 points)...")
     plot_l2_sensitivity()
+
+    print("\nRunning node-scaling sweep (4 points)...")
+    plot_node_scaling()
 
     print(f"\nAll plots saved to {OUT_DIR}/")
 

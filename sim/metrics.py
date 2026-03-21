@@ -45,6 +45,9 @@ class MetricsCollector:
     decode_queue_depth: list[int] = field(default_factory=list)
     prefill_slot_blocked_us: int = 0
 
+    # Queue wait time (microseconds) — time from entering pending queue to slot obtained
+    queue_wait_us: list[int] = field(default_factory=list)
+
     # Sharing
     tokens_served_from_shared_prefix: int = 0
     total_tokens_served: int = 0
@@ -59,6 +62,15 @@ class MetricsCollector:
     l1_to_l2_ttl_migrations: int = 0     # TTL-driven tier migration (not pressure)
     l2_to_l3a_evictions: int = 0
     session_cold_evictions: int = 0
+
+    # Multi-node metrics
+    per_node_queue_depth: dict[int, list[int]] = field(default_factory=lambda: defaultdict(list))
+    per_node_l1_occupancy_pct: dict[int, list[float]] = field(default_factory=lambda: defaultdict(list))
+    per_node_l2_occupancy_pct: dict[int, list[float]] = field(default_factory=lambda: defaultdict(list))
+    per_node_prefill_count: dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    affinity_dispatches: int = 0
+    non_affinity_dispatches: int = 0
+    cross_node_transfers: int = 0
 
     # Total sim time for rate calculations
     effective_sim_us: int = 0
@@ -138,7 +150,21 @@ class MetricsCollector:
         total_us = max(1, self.effective_sim_us)
         blocked_pct = r(self.prefill_slot_blocked_us / total_us * 100)
 
-        return {
+        # Queue wait stats
+        queue_wait_ms = {}
+        if self.queue_wait_us:
+            for p in [50, 95, 99]:
+                queue_wait_ms[f"p{p}"] = r(float(np.percentile(self.queue_wait_us, p)) / 1000.0)
+            queue_wait_ms["mean"] = r(float(np.mean(self.queue_wait_us)) / 1000.0)
+
+        # Multi-node dispatch stats
+        dispatch_stats = {
+            "affinity_dispatches": self.affinity_dispatches,
+            "non_affinity_dispatches": self.non_affinity_dispatches,
+            "cross_node_transfers": self.cross_node_transfers,
+        }
+
+        result = {
             "tier_saturation_pct": tier_sat,
             "ttft_ms": ttft_ms,
             "cache_hit_rate": hit_rate,
@@ -149,3 +175,11 @@ class MetricsCollector:
             "savings_class_distribution": savings_dist,
             "prefill_slot_blocked_pct": blocked_pct,
         }
+
+        if queue_wait_ms:
+            result["queue_wait_ms"] = queue_wait_ms
+
+        if self.affinity_dispatches + self.non_affinity_dispatches > 0:
+            result["dispatch_stats"] = dispatch_stats
+
+        return result
