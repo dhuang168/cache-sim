@@ -104,14 +104,17 @@ Objects flow downward (L1 → L2 → L3A) via TTL expiration and occupancy-based
 
 ## Workload Profiles
 
-Four built-in profiles model different inference patterns:
+Five built-in profiles model different inference patterns:
 
 | Profile | Arrival Rate | IAT | Session Length | Context Growth | Shared Prefix |
 |---------|-------------|-----|----------------|----------------|---------------|
-| **chat** | 100 req/s peak | 45s (exp) | 10 min | 100-500 tok/turn | 2048 tokens |
-| **coding** | 50 req/s peak | 360s (lognorm) | 1 hour | 500-2000 tok/turn | 2048 tokens |
-| **batch** | 200 req/s peak | 0.1s (exp) | 1s | none | 2048 tokens |
-| **agent** | 30 req/s peak | 15s (exp) | 30 min | 300-1500 tok/turn | 2048 tokens |
+| **chat** | 100 req/s peak | 45s (exp) | 10 min | 100-500 tok/turn | 2,048 tokens |
+| **coding** | 50 req/s peak | 360s (lognorm) | 1 hour | 2k-10k tok/turn | 20,000 tokens |
+| **batch** | 200 req/s peak | 0.1s (exp) | 1s | none | 2,048 tokens |
+| **agent** | 30 req/s peak | 15s (exp) | 30 min | 300-1.5k tok/turn | 2,048 tokens |
+| **agentic_coding** | 20 req/s peak | 30s (exp) | 30 min | 5k-20k tok/turn | 30,000 tokens |
+
+The **coding** and **agentic_coding** profiles reflect real-world coding assistant workloads (Claude Code, Cursor, GitHub Copilot) where total prompt lengths reach 40-80k tokens with 80-95% cacheability. See `plan_and_progress/research_coding_workload_tokens.md` for the supporting research.
 
 ## Metrics Collected
 

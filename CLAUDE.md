@@ -31,7 +31,7 @@ This causes output issues. Run pytest without stderr redirection.
 - **sim/cache.py** — `CacheObject`, `TierStore` (per-tier storage manager), `PrefixTrie` (token hash-based prefix matching), `kv_size_bytes()` formula.
 - **sim/eviction.py** — `EvictionEngine` manages L1->L2->L3A movement. L1 eviction is watermark-based, L2->L3A is TTL-driven, L3A cleanup is LRU.
 - **sim/oracle.py** — `PrefillOracle` (piecewise-linear interpolation from A100 benchmark table), `DecodeOracle` (sqrt batch degradation model), `transfer_time_us()`, `is_cache_worthwhile()`.
-- **sim/workload.py** — `WorkloadSynthesizer` generates arrivals via NHPP (thinning algorithm) with sinusoidal diurnal modulation. Four profiles: chat, coding, batch, agent.
+- **sim/workload.py** — `WorkloadSynthesizer` generates arrivals via NHPP (thinning algorithm) with sinusoidal diurnal modulation. Five profiles: chat, coding, batch, agent, agentic_coding.
 - **sim/service.py** — `ServiceModel` tracks prefill/decode GPU slot pools with queue backpressure.
 - **sim/metrics.py** — `MetricsCollector` accumulates TTFT, hit rates, evictions, occupancy, sharing factor. `.report()` produces the summary dict.
 - **sim/config.py** — Dataclass-based config loaded from JSON. `SimConfig.from_json()` is the standard entry point.
@@ -150,9 +150,20 @@ Added for multi-node prefill dispatch (all have backward-compatible defaults):
 
 Existing `n_prefill_slots` and `prefill_queue_max` are **per-node**. L1/L2 tier capacities are **per-node**. L3A capacity is **global** when shared, **total** (divided by N) when local.
 
+## Workload Profiles (v2)
+
+The `coding` and `agentic_coding` profiles reflect real-world coding assistant workloads based on research into Claude Code, Cursor, and GitHub Copilot token usage:
+- **coding**: 20k shared system prefix, 8k input/turn, 95→80% prefix stability. Models standard IDE coding assistants.
+- **agentic_coding**: 30k shared system prefix, 15k input/turn, 95→85% prefix stability. Models heavy agent sessions (Claude Code agent, Cursor agent mode).
+
+At 70B FP16, a 60k-token KV object is ~18.3 GB. L1 (80GB) fits only ~4 such objects, creating real eviction pressure.
+
+Legacy v1 profiles (smaller token counts) are preserved in `configs/legacy_v1.json`.
+
 ## Config Tips
 
-- `configs/default.json` is the reference config. Don't modify it — load it and override fields programmatically.
+- `configs/default.json` is the v2 reference config. Don't modify it — load it and override fields programmatically.
+- `configs/legacy_v1.json` has the original v1 profiles (smaller token counts) for backward compat.
 - Tier order in `tiers[]` must be [L1, L2, L3A] — the engine indexes by position.
 - `profile_mix` weights must sum to 1.0.
 - `enable_suffix_cache` and `enable_l3b_object_store` are v2 features — setting them to `true` raises `NotImplementedError`.

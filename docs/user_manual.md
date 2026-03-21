@@ -148,12 +148,15 @@ A dict mapping profile names to weights (must sum to 1.0):
 
 ```json
 "profile_mix": {
-    "chat": 0.4,
-    "coding": 0.2,
-    "batch": 0.25,
-    "agent": 0.15
+    "chat": 0.30,
+    "coding": 0.20,
+    "batch": 0.20,
+    "agent": 0.15,
+    "agentic_coding": 0.15
 }
 ```
+
+The **coding** (20k system prefix, 8k input/turn) and **agentic_coding** (30k system prefix, 15k input/turn) profiles reflect real-world coding assistant workloads. See `plan_and_progress/research_coding_workload_tokens.md` for supporting data.
 
 ### Service Configuration (`service`)
 
