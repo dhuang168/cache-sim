@@ -170,8 +170,11 @@ The **coding** (20k system prefix, 8k input/turn) and **agentic_coding** (30k sy
 | `dispatch_algorithm` | `"push"` (affinity routing) or `"pull"` (global queue) |
 | `inter_node_latency_us` | Base cross-node transfer latency (default: 5) |
 | `inter_node_bandwidth_bytes_per_s` | Cross-node bandwidth (default: 100 GB/s) |
-| `l3a_shared` | `true` = global L3A, `false` = per-node L3A (default: true) |
+| `n_gpus_per_worker` | GPUs per host sharing DRAM and SSD (default: 8) |
+| `l3a_shared` | `true` = global L3A, `false` = per-worker local L3A (default: true) |
 | `l3a_remote_latency_us` | Additional latency for global L3A access (default: 50000 = 50ms) |
+
+Note: L1 capacity is per-GPU, L2 capacity is per-worker (shared by GPUs on same host), L3A capacity is global (when shared) or per-worker (when local). `n_prefill_nodes` must be divisible by `n_gpus_per_worker`.
 
 ## Common Recipes
 

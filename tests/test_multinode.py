@@ -23,16 +23,18 @@ def _quick_config() -> SimConfig:
     return config
 
 
-def _stressed_multinode_config(n_nodes: int, algorithm: str = "push") -> SimConfig:
+def _stressed_multinode_config(n_nodes: int, algorithm: str = "push", gpus_per_worker: int | None = None) -> SimConfig:
     """Stressed config with multiple nodes — small L1 forces multi-tier activity."""
     config = _quick_config()
-    config.tiers[0].capacity_bytes = 500 * 1024**2  # 500 MB L1 per node
-    config.tiers[1].capacity_bytes = 2 * 1024**3     # 2 GB L2 per node
+    config.tiers[0].capacity_bytes = 500 * 1024**2  # 500 MB L1 per GPU
+    config.tiers[1].capacity_bytes = 2 * 1024**3     # 2 GB L2 per worker
     config.tiers[2].capacity_bytes = 50 * 1024**3     # 50 GB shared L3A
     config.ttl_l2_s = 20.0
     config.ttl_l3a_s = 120.0
     config.service.n_prefill_nodes = n_nodes
     config.service.dispatch_algorithm = algorithm
+    # Default: all GPUs on one worker (simplest topology for tests)
+    config.service.n_gpus_per_worker = gpus_per_worker if gpus_per_worker else n_nodes
     return config
 
 
@@ -157,6 +159,37 @@ def test_global_vs_local_l3a_hit_rate():
     assert miss_g <= miss_l + 0.05, (
         f"Global L3A miss rate ({miss_g:.3f}) should be <= local ({miss_l:.3f})"
     )
+
+
+def test_worker_topology_shared_l2():
+    """8 GPUs across 2 workers: GPUs on same worker share L2."""
+    config = _stressed_multinode_config(8, "push", gpus_per_worker=4)
+    engine = SimEngine(config)
+
+    # GPUs 0-3 should share L2, GPUs 4-7 should share L2
+    assert engine.nodes[0].l2_store is engine.nodes[1].l2_store
+    assert engine.nodes[0].l2_store is engine.nodes[3].l2_store
+    assert engine.nodes[4].l2_store is engine.nodes[7].l2_store
+    # Different workers should NOT share L2
+    assert engine.nodes[0].l2_store is not engine.nodes[4].l2_store
+
+    # Worker IDs should be correct
+    for i in range(4):
+        assert engine.nodes[i].worker_id == 0
+    for i in range(4, 8):
+        assert engine.nodes[i].worker_id == 1
+
+    metrics = engine.run()
+    assert sum(metrics.savings_events.values()) > 0
+
+
+def test_intra_worker_no_l2_penalty():
+    """L2 hit on same worker should not incur cross-node transfer penalty."""
+    config = _stressed_multinode_config(8, "push", gpus_per_worker=4)
+    engine = SimEngine(config)
+    # GPUs on same worker share L2 — same_worker check
+    assert engine._same_worker(0, 3) is True
+    assert engine._same_worker(0, 4) is False
 
 
 def test_multinode_perf_benchmark(benchmark):

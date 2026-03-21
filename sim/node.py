@@ -6,11 +6,13 @@ from sim.cache import TierStore, Tier
 
 
 class PrefillNode:
-    """Per-node state: local L1/L2, prefill slots, and pending queue."""
+    """Per-GPU state: own L1 (HBM), prefill slots, and pending queue.
+    L2 and L3A are shared at the worker level (multiple GPUs per worker)."""
 
     def __init__(
         self,
         node_id: int,
+        worker_id: int,
         l1_store: TierStore,
         l2_store: TierStore,
         prefill_slots: int,
@@ -18,9 +20,10 @@ class PrefillNode:
         l3a_store: TierStore | None = None,
     ):
         self.node_id = node_id
+        self.worker_id = worker_id
         self.l1_store = l1_store
-        self.l2_store = l2_store
-        self.l3a_store = l3a_store  # None when L3A is shared (global)
+        self.l2_store = l2_store  # shared with other GPUs on same worker
+        self.l3a_store = l3a_store  # shared with other GPUs on same worker (when local)
         self.prefill_slots_total = prefill_slots
         self.prefill_slots_free = prefill_slots
         self.prefill_queue_max = prefill_queue_max
@@ -28,7 +31,7 @@ class PrefillNode:
         self.active_completions: list[int] = []  # sorted completion times
 
     def has_session_cached(self, session_id: str) -> bool:
-        """Check if any KV object for this session is in this node's L1 or L2."""
+        """Check if any KV object for this session is in this node's L1 or worker's L2."""
         for obj in self.l1_store.objects.values():
             if obj.session_id == session_id:
                 return True

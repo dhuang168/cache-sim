@@ -61,34 +61,57 @@ class SimEngine:
         self.metrics = MetricsCollector()
 
         n_nodes = config.service.n_prefill_nodes
+        gpus_per_worker = config.service.n_gpus_per_worker
         self._l3a_shared = config.service.l3a_shared
+        self._gpus_per_worker = gpus_per_worker
 
-        # L3A setup: shared (global) or per-node (local)
+        # Compute number of workers
+        if n_nodes == 1:
+            n_workers = 1
+        else:
+            assert n_nodes % gpus_per_worker == 0, (
+                f"n_prefill_nodes ({n_nodes}) must be divisible by n_gpus_per_worker ({gpus_per_worker})"
+            )
+            n_workers = n_nodes // gpus_per_worker
+        self._n_workers = n_workers
+
+        # L3A setup: shared (global) or per-worker (local)
         l3a_cfg = config.tiers[2]
         if self._l3a_shared:
             self._shared_l3a = TierStore(l3a_cfg.name, l3a_cfg.capacity_bytes, l3a_cfg.block_size_bytes)
         else:
             self._shared_l3a = None  # no global L3A in local mode
 
-        # Create per-node L1/L2 stores and PrefillNode instances
+        # Create per-worker shared L2 (DRAM) and local L3A (SSD) stores,
+        # then per-GPU L1 (HBM) stores
+        l1_cfg = config.tiers[0]
+        l2_cfg = config.tiers[1]
+
+        self._worker_l2_stores: list[TierStore] = []
+        self._worker_l3a_stores: list[TierStore | None] = []
+        for w in range(n_workers):
+            l2 = TierStore(l2_cfg.name, l2_cfg.capacity_bytes, l2_cfg.block_size_bytes)
+            self._worker_l2_stores.append(l2)
+            if not self._l3a_shared:
+                local_l3a = TierStore(l3a_cfg.name, l3a_cfg.capacity_bytes, l3a_cfg.block_size_bytes)
+                self._worker_l3a_stores.append(local_l3a)
+            else:
+                self._worker_l3a_stores.append(None)
+
         self.nodes: list[PrefillNode] = []
         for i in range(n_nodes):
-            l1_cfg = config.tiers[0]
-            l2_cfg = config.tiers[1]
+            worker_id = i // gpus_per_worker if n_nodes > 1 else 0
             l1 = TierStore(l1_cfg.name, l1_cfg.capacity_bytes, l1_cfg.block_size_bytes)
-            l2 = TierStore(l2_cfg.name, l2_cfg.capacity_bytes, l2_cfg.block_size_bytes)
-            # Per-node L3A when not shared
-            local_l3a = None
-            if not self._l3a_shared:
-                local_cap = l3a_cfg.capacity_bytes // n_nodes
-                local_l3a = TierStore(l3a_cfg.name, local_cap, l3a_cfg.block_size_bytes)
+            worker_l2 = self._worker_l2_stores[worker_id]
+            worker_l3a = self._worker_l3a_stores[worker_id]
             node = PrefillNode(
                 node_id=i,
+                worker_id=worker_id,
                 l1_store=l1,
-                l2_store=l2,
+                l2_store=worker_l2,  # shared with other GPUs on same worker
                 prefill_slots=config.service.n_prefill_slots,
                 prefill_queue_max=config.service.prefill_queue_max,
-                l3a_store=local_l3a,
+                l3a_store=worker_l3a,  # shared with other GPUs on same worker
             )
             self.nodes.append(node)
 
@@ -342,8 +365,18 @@ class SimEngine:
             return self._shared_l3a
         return self.nodes[node_id].l3a_store
 
-    def _inter_node_transfer_us(self, size_bytes: int) -> int:
-        """Latency for cross-node transfer (NVLink or similar)."""
+    def _same_worker(self, node_id_a: int, node_id_b: int) -> bool:
+        """Check if two GPU nodes are on the same worker (share L2/L3A)."""
+        return self.nodes[node_id_a].worker_id == self.nodes[node_id_b].worker_id
+
+    def _cross_node_transfer_us(self, size_bytes: int, from_node_id: int, to_node_id: int) -> int:
+        """Transfer latency between two GPU nodes.
+        Intra-worker (same host): small NVLink penalty for L1-to-L1, zero for shared L2/L3A.
+        Inter-worker (different host): full network penalty."""
+        if self._same_worker(from_node_id, to_node_id):
+            # Intra-worker: NVLink between GPUs — use inter_node config but fast
+            svc = self.config.service
+            return svc.inter_node_latency_us  # just base latency, no bandwidth penalty
         svc = self.config.service
         return svc.inter_node_latency_us + int(
             (size_bytes / svc.inter_node_bandwidth_bytes_per_s) * 1_000_000
@@ -452,9 +485,15 @@ class SimEngine:
             and n_nodes > 1
             and kv_bytes > 0
         ):
-            cross_node_penalty_us = self._inter_node_transfer_us(kv_bytes)
-            if collecting:
-                self.metrics.cross_node_transfers += 1
+            if hit_tier == Tier.L2 and self._same_worker(hit_node_id, assigned_node_id):
+                # L2 hit on same worker — no penalty (shared DRAM)
+                pass
+            else:
+                cross_node_penalty_us = self._cross_node_transfer_us(
+                    kv_bytes, hit_node_id, assigned_node_id
+                )
+                if collecting:
+                    self.metrics.cross_node_transfers += 1
 
         if hit_tier and hit_tier != Tier.L1 and kv_bytes > 0:
             tier_cfg = self.config.tiers[[Tier.L1, Tier.L2, Tier.L3A].index(hit_tier)]
@@ -852,10 +891,9 @@ class SimEngine:
             return
 
         # Record per-node and aggregate tier occupancy
+        # L1 is per-GPU, L2 is per-worker (shared by GPUs on same host)
         agg_l1_used = 0
         agg_l1_cap = 0
-        agg_l2_used = 0
-        agg_l2_cap = 0
         for node in self.nodes:
             l1_occ = node.l1_store.occupancy_pct * 100.0
             l2_occ = node.l2_store.occupancy_pct * 100.0
@@ -864,10 +902,11 @@ class SimEngine:
             self.metrics.per_node_queue_depth[node.node_id].append(len(node.pending_prefills))
             agg_l1_used += node.l1_store.used_bytes
             agg_l1_cap += node.l1_store.capacity_bytes
-            agg_l2_used += node.l2_store.used_bytes
-            agg_l2_cap += node.l2_store.capacity_bytes
 
-        # Aggregate L1/L2 occupancy across all nodes
+        # Aggregate L2 by worker (avoid double-counting shared L2 stores)
+        agg_l2_used = sum(s.used_bytes for s in self._worker_l2_stores)
+        agg_l2_cap = sum(s.capacity_bytes for s in self._worker_l2_stores)
+
         self.metrics.tier_occupancy_pct["L1"].append(
             (agg_l1_used / agg_l1_cap * 100.0) if agg_l1_cap > 0 else 0.0
         )
@@ -879,8 +918,9 @@ class SimEngine:
                 self._shared_l3a.occupancy_pct * 100.0
             )
         else:
-            agg_l3a_used = sum(n.l3a_store.used_bytes for n in self.nodes)
-            agg_l3a_cap = sum(n.l3a_store.capacity_bytes for n in self.nodes)
+            # Aggregate local L3A by worker (avoid double-counting)
+            agg_l3a_used = sum(s.used_bytes for s in self._worker_l3a_stores if s)
+            agg_l3a_cap = sum(s.capacity_bytes for s in self._worker_l3a_stores if s)
             self.metrics.tier_occupancy_pct["L3A"].append(
                 (agg_l3a_used / agg_l3a_cap * 100.0) if agg_l3a_cap > 0 else 0.0
             )
@@ -892,32 +932,24 @@ class SimEngine:
         self.metrics.prefill_queue_depth.append(total_pending)
         self.metrics.decode_queue_depth.append(len(self.service.decode_queue))
 
-        # Record memory pollution
+        # Record memory pollution (aggregate by worker for L2/L3A, by node for L1)
         agg_l1_frag = sum(n.l1_store.fragmentation_bytes() for n in self.nodes)
-        agg_l2_frag = sum(n.l2_store.fragmentation_bytes() for n in self.nodes)
+        agg_l2_frag = sum(s.fragmentation_bytes() for s in self._worker_l2_stores)
         self.metrics.memory_pollution_bytes["L1"] = agg_l1_frag
         self.metrics.memory_pollution_bytes["L2"] = agg_l2_frag
         if self._l3a_shared:
             self.metrics.memory_pollution_bytes["L3A"] = self._shared_l3a.fragmentation_bytes()
         else:
             self.metrics.memory_pollution_bytes["L3A"] = sum(
-                n.l3a_store.fragmentation_bytes() for n in self.nodes
+                s.fragmentation_bytes() for s in self._worker_l3a_stores if s
             )
 
         # Accumulate prefill blocked time
         self.metrics.prefill_slot_blocked_us += self.service.get_blocked_us(self.sim_clock_us)
 
-        # Run TTL and eviction checks per node
+        # Run L1 eviction checks per GPU node
         for node_id, node in enumerate(self.nodes):
             eviction = self._node_eviction[node_id]
-
-            # L2 -> L3a hibernation
-            expired_l2 = eviction.find_ttl_expired_l2(self.sim_clock_us)
-            for key in expired_l2:
-                eviction.hibernate_l2_to_l3a(key)
-                self.metrics.l2_to_l3a_evictions += 1
-
-            # L1 pressure check
             if eviction.needs_l1_eviction():
                 l1 = node.l1_store
                 target = int(l1.capacity_bytes * self.config.eviction_hbm_threshold * 0.9)
@@ -925,6 +957,18 @@ class SimEngine:
                 if to_free > 0:
                     evicted = eviction.evict_l1_to_l2(to_free)
                     self.metrics.l1_to_l2_evictions += len(evicted)
+
+        # Run L2 -> L3A hibernation checks per worker (L2 is shared within worker)
+        checked_workers = set()
+        for node_id, node in enumerate(self.nodes):
+            if node.worker_id in checked_workers:
+                continue
+            checked_workers.add(node.worker_id)
+            eviction = self._node_eviction[node_id]
+            expired_l2 = eviction.find_ttl_expired_l2(self.sim_clock_us)
+            for key in expired_l2:
+                eviction.hibernate_l2_to_l3a(key)
+                self.metrics.l2_to_l3a_evictions += 1
 
         # L3a TTL checks
         if self._l3a_shared:
@@ -938,7 +982,12 @@ class SimEngine:
                 self._shared_l3a.remove(key)
                 self.metrics.session_cold_evictions += 1
         else:
+            # Local L3A: check once per worker
+            checked_workers_l3a = set()
             for node_id, node in enumerate(self.nodes):
+                if node.worker_id in checked_workers_l3a:
+                    continue
+                checked_workers_l3a.add(node.worker_id)
                 eviction = self._node_eviction[node_id]
                 expired_l3a = eviction.find_ttl_expired_l3a(self.sim_clock_us)
                 for key in expired_l3a:

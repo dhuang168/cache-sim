@@ -159,10 +159,21 @@ Added for multi-node prefill dispatch (all have backward-compatible defaults):
 | `dispatch_algorithm` | `"push"` | `"push"` (affinity routing) or `"pull"` (global queue) |
 | `inter_node_latency_us` | `5` | Base cross-node transfer latency |
 | `inter_node_bandwidth_bytes_per_s` | `100_000_000_000` | 100 GB/s (NVLink) |
-| `l3a_shared` | `True` | `True` = global shared L3A; `False` = per-node L3A with `capacity/N` |
+| `n_gpus_per_worker` | `8` | GPUs per worker sharing host DRAM (L2) and SSD (L3A) |
+| `l3a_shared` | `True` | `True` = global shared L3A; `False` = per-worker local L3A |
 | `l3a_remote_latency_us` | `50_000` | Additional latency for global L3A access (50ms) |
 
-Existing `n_prefill_slots` and `prefill_queue_max` are **per-node**. L1/L2 tier capacities are **per-node**. L3A capacity is **global** when shared, **total** (divided by N) when local.
+**Tier capacity semantics:**
+- L1 capacity: **per-GPU** (each GPU has own HBM)
+- L2 capacity: **per-worker** (shared by `n_gpus_per_worker` GPUs on the same host)
+- L3A capacity: **global** when shared, **per-worker** when local
+- `n_prefill_nodes` must be divisible by `n_gpus_per_worker` (or equal to 1)
+- Existing `n_prefill_slots` and `prefill_queue_max` are **per-GPU**
+
+**Transfer latency model:**
+- Intra-worker L2 hit: no penalty (shared DRAM on same host)
+- Intra-worker L1 hit from another GPU: small NVLink penalty (`inter_node_latency_us` only)
+- Inter-worker hit: full `inter_node_latency_us` + bandwidth penalty
 
 ## Workload Profiles (v2)
 

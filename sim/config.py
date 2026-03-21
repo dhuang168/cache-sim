@@ -52,6 +52,7 @@ class ServiceConfig:
     dispatch_algorithm: str = "push"
     inter_node_latency_us: int = 5
     inter_node_bandwidth_bytes_per_s: int = 100_000_000_000  # 100 GB/s NVLink
+    n_gpus_per_worker: int = 8  # GPUs sharing one host's DRAM (L2) and SSD (L3A)
     l3a_shared: bool = True
     l3a_remote_latency_us: int = 50_000  # 50ms for remote/global L3A access
 
