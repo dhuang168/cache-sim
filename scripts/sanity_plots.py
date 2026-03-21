@@ -41,6 +41,7 @@ def short_config() -> SimConfig:
     cfg.sim_duration_s = 60.0
     cfg.warmup_s = 5.0
     cfg.epoch_report_interval_s = 5.0
+    cfg.sim_start_time_s = 36000.0  # 10 AM — peak business hours
     return cfg
 
 

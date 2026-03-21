@@ -72,6 +72,7 @@ class SimConfig:
     sim_duration_s: float
     warmup_s: float
     epoch_report_interval_s: float
+    sim_start_time_s: float = 0.0  # wall-clock offset for diurnal rate (0=midnight, 32400=9AM)
     enable_suffix_cache: bool = False
     enable_l3b_object_store: bool = False
 

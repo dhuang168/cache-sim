@@ -19,6 +19,7 @@ def _short_config() -> SimConfig:
     config.sim_duration_s = 60.0
     config.warmup_s = 5.0
     config.epoch_report_interval_s = 5.0
+    config.sim_start_time_s = 36000.0  # 10 AM — ensures all profiles have nonzero arrival rate
     return config
 
 

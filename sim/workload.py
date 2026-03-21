@@ -17,6 +17,7 @@ class WorkloadSynthesizer:
     def __init__(self, config: SimConfig, rng: np.random.Generator):
         self.config = config
         self.rng = rng
+        self._start_time_s = config.sim_start_time_s
         # Pre-compute per-profile rate constants
         self._rate_cache: dict[str, tuple[float, float]] = {}
         for p in config.profiles:
@@ -30,7 +31,7 @@ class WorkloadSynthesizer:
         Sinusoidal with period 86400s, peak at 9 AM (offset 32400s).
         """
         mean_rate, amplitude = self._rate_cache[profile.name]
-        phase = _TWO_PI_OVER_86400 * (time_s - 32400.0)
+        phase = _TWO_PI_OVER_86400 * (time_s + self._start_time_s - 32400.0)
         return max(0.0, mean_rate + amplitude * math.sin(phase))
 
     def sample_iat(self, profile: WorkloadProfile) -> float:

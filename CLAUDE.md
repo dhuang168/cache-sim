@@ -39,6 +39,15 @@ This causes output issues. Run pytest without stderr redirection.
 - **sim/dispatch.py** — `PushDispatcher` (affinity-aware routing) and `PullDispatcher` (global queue with affinity scoring). Push prefers nodes with session's KV cached; pull lets idle nodes pull from a global queue.
 - **sim/analysis.py** — `find_sustaining_qps()` binary search for max arrival rate multiplier at a given SLA threshold (p95 queue wait).
 
+## User/Session Model
+
+The simulator models **multi-user concurrent workloads**:
+- Each **session** = one user's conversation. Created by `_new_session()` with a unique `session_id`.
+- Sessions are **independent**: each has its own `SessionState` (context growth, turn count), session prefix trie, and KV cache objects.
+- **KV objects are per-session, not shared across users**. Two users with identical system prompts each store their own KV objects in the cache hierarchy. This models real LLM serving where KV cache tensors are per-sequence.
+- The only **cross-session sharing** is the `shared_system_prefix_tokens` mechanism: a single shared prefix object (`sp-{profile_name}`) in the prefix trie avoids redundant recomputation of the system prompt during prefill. But each session still writes its own full KV object to L1/L2/L3A.
+- With N concurrent coding users (each with 20k shared prefix + growing context), the cache must hold N separate multi-GB KV objects — creating real capacity pressure.
+
 ## Key Design Constraints
 
 - **Sim clock is int64 microseconds** — never use floats for time in the engine.
@@ -103,6 +112,11 @@ These are **mandatory** — must all pass before any exploratory run. They test 
 **Symptom**: L1 sensitivity plot showed eviction rate *increasing* with L1 capacity and then plateauing, which seemed counter-intuitive.
 **Root cause**: `l1_to_l2_evictions` counted both TTL-driven tier demotions (time-based, constant rate) and occupancy-driven pressure evictions (capacity-dependent). The TTL-driven moves dominated, masking the capacity relationship.
 **Fix**: Split into two metrics: `l1_to_l2_evictions` (pressure-driven only) and `l1_to_l2_ttl_migrations` (TTL-driven). The L1 sensitivity plot now shows both separately. The plateau behavior is correct — once L1 can accept objects, the throughput rate equals the arrival rate regardless of capacity.
+
+### Bug: Short sims only generated batch traffic (diurnal rate = 0 at midnight)
+**Symptom**: With v2 workload profiles, only `batch` produced KV objects. Chat, coding, agent, agentic_coding generated zero sessions.
+**Root cause**: The NHPP diurnal rate model peaks at 9 AM (offset 32400s). At t=0 (midnight), all profiles with `diurnal_peak_trough_ratio=4.0` have rate=0. The first arrival for non-batch profiles was at ~22,400s (~6.2 hours) — well beyond the 60s sim duration. Batch survived because its ratio=1.5 (nearly flat).
+**Fix**: Added `sim_start_time_s` config field (default: 0). Short sim configs now set `sim_start_time_s=36000` (10 AM) so all profiles have nonzero arrival rates. The offset is added to `time_s` in `WorkloadSynthesizer.diurnal_rate()`.
 
 ### Performance: Tests are slow (~10 min total)
 Each invariant test runs a 60s simulation with 5s warmup. This is inherent to the DES approach — there's no way to skip the event processing. For faster iteration during development, reduce `sim_duration_s` and `warmup_s` further, but the invariant tests need enough events to be meaningful.
