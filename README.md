@@ -119,6 +119,7 @@ python scripts/heavy_coding_analysis.py
 python scripts/sweep.py --config configs/default.json --output results/sweep.json
 ```
 
+See [docs/architecture.md](docs/architecture.md) for how the simulation works end-to-end.
 See [docs/user_manual.md](docs/user_manual.md) for full usage instructions.
 See [docs/heavy_coding_report.md](docs/heavy_coding_report.md) for the heavy coding workload analysis.
 
@@ -156,6 +157,7 @@ cache_sim/
 │   ├── test_oracle.py          # 5 latency oracle tests
 │   └── test_multinode.py       # 14 multi-node dispatch + topology tests
 ├── docs/
+│   ├── architecture.md         # How the simulation works end-to-end
 │   ├── user_manual.md          # Full usage instructions
 │   ├── heavy_coding_report.md  # Heavy coding workload analysis report
 │   └── example_report.md       # Example sanity-check report
