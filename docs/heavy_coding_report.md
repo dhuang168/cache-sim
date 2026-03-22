@@ -16,6 +16,18 @@
 
 **KV object sizes** (70B FP16): coding ~8.2 GB, agentic_coding ~15.6 GB, chat ~0.8 GB.
 
+**Prefill compute cost** scales quadratically with token count (O(n²) attention):
+
+| Tokens | Prefill Latency |
+|--------|----------------|
+| 10,000 | 2.2s |
+| 30,000 | 14.9s |
+| 50,000 | 37.0s |
+| 65,000 | 54.4s |
+| 100,000 | 120.7s |
+
+A cache hit on a 95k-token agentic_coding context saves **98s** (13s hit vs 111s cold miss — 88% reduction).
+
 ## Hardware
 
 | Tier | Capacity | Bandwidth | Scope |
@@ -24,53 +36,74 @@
 | L2 (DRAM) | 1 TB | 64 GB/s | Per-worker (8 GPUs share) |
 | L3A (SSD) | 8 TB | 7 GB/s | Per-worker; global mode pools all workers |
 
-Worker topology: 8 GPUs/worker. Global L3A: 4 workers × 8 TB = 32 TB pooled. Local L3A: 8 TB/worker.
+Worker topology: 8 GPUs/worker. Global L3A: N workers × 8 TB = pooled. Local L3A: 8 TB/worker.
 
 ---
 
-## 1. Global vs Local L3A
+## 1. Global vs Local L3A — The Central Finding
 
-The central finding: **global L3A is essential for multi-worker coding deployments.**
+**Global L3A is essential for multi-worker coding deployments.**
 
 ### Hit Rate Over Time (4 workers × 8 GPUs, 20 min)
 
-| Duration | Global L3A | Local L3A | Gap |
-|----------|-----------|----------|-----|
-| 1 min | 99.91% | 99.91% | 0% |
-| 5 min | 99.81% | **55.23%** | **+44.6%** |
-| 10 min | 99.73% | **36.74%** | **+63.0%** |
-| 20 min | 99.77% | **26.56%** | **+73.2%** |
-
-### Timeline: L2/L3A Occupancy, Queue Depth, Cold Evictions
 ![Global vs Local Timeline](../plots/heavy_coding/global_vs_local_timeline.png)
 
-Both global and local L3A reach 100% occupancy quickly. The difference: with local L3A, cold evictions spike as migrated sessions can't find their KV → queue depth grows from cold-miss recomputes.
+| Metric | Global L3A | Local L3A |
+|--------|-----------|----------|
+| Hit rate | **99.8%** | **68.6%** |
+| Cold misses | 1,921 | **259,179** |
+| Cold evictions | 13,849 | 3,492 |
+
+Global maintains 99.8% throughout. Local degrades to 68.6% as sessions migrate between workers and can't find their KV on the new worker's SSD.
 
 ### Node Scaling (1-4 workers, 20 min)
+
 ![Node Scaling 20min](../plots/heavy_coding/node_scaling_20min.png)
 
-| Workers | GPUs | Global Hit | Local Hit | Local Misses |
-|---------|------|-----------|----------|-------------|
-| 1 | 8 | 99.8% | 99.8% | 1,921 |
-| 2 | 16 | 99.8% | **49.3%** | 418,173 |
-| 4 | 32 | 99.8% | **26.6%** | 606,005 |
+| Workers | GPUs | Global Hit | Global QW p95 | Local Hit | Local QW p95 |
+|---------|------|-----------|--------------|----------|-------------|
+| 1 | 8 | 99.8% | 115s | 99.8% | 115s |
+| 2 | 16 | 99.8% | 113s | **86.5%** | **250s** |
+| 4 | 32 | 99.8% | 116s | **68.6%** | **394s** |
 
-At 1 worker: identical (no cross-worker migration). At 2+ workers: local L3A collapses because sessions migrate and can't find KV on the new worker.
-
-**Note on queue wait p95**: The node scaling plot shows queue wait ~80s for global and ~70s for local. This is **not** meaningful — the system is so overloaded (arrival 693/s vs throughput 78/s) that **88.7% of requests are dropped** before entering the queue. Both queues are permanently full (~4000 depth). The 10s difference is noise on equally-saturated queues. Queue wait is only meaningful when the system is not in severe overload.
+At 1 worker: identical (no migration). At 2+ workers: local queue wait **explodes** (250-394s p95) because cold misses take 37-120s each, blocking slots and cascading into queue buildup. Global maintains steady 115s queue wait.
 
 ### TTL Sensitivity (4 workers, 20 min)
+
 ![TTL Sensitivity 20min](../plots/heavy_coding/ttl_sensitivity_20min.png)
 
-| L2 TTL | Global Hit | Local Hit |
-|--------|-----------|----------|
-| 10s | 99.8% | 26.5% |
-| 30s | 99.8% | 33.8% |
-| 60s | 99.8% | 26.9% |
-| 120s | 99.8% | 27.1% |
-| 300s | 99.8% | 26.6% |
+| L2 TTL | Global Hit | Global QW p95 | Local Hit | Local QW p95 |
+|--------|-----------|--------------|----------|-------------|
+| 10s | 99.8% | 115s | 69.5% | 357s |
+| 60s | 99.8% | 115s | 69.9% | 379s |
+| 300s | 99.8% | 116s | 68.6% | 394s |
 
-**TTL has minimal impact** on either mode. Global L3A maintains 99.8% regardless. Local L3A stays at ~27% regardless — the bottleneck is cross-worker accessibility, not object lifetime.
+TTL has no impact on either mode. The bottleneck is cross-worker L3A accessibility, not object lifetime.
+
+### Controlled Load Tests (4 workers, 20 min)
+
+At reduced arrival rates where the system isn't in severe overload:
+
+**Test (a): ~75 req/s arrival (peak=3)**
+
+| Metric | Global | Local | Global Advantage |
+|--------|--------|-------|-----------------|
+| Hit rate | 99.8% | 76.7% | +23pt |
+| Dropped | 4% | **40%** | 10× fewer drops |
+| Queue wait mean | 2.7s | **50.8s** | **19× shorter** |
+| Queue wait p95 | 19s | **244s** | **13× shorter** |
+| TTFT mean | 25s | **80s** | **3.1× faster** |
+| TTFT p95 | 72s | **314s** | **4.4× faster** |
+
+**Test (b): ~125 req/s arrival (peak=5) — completion count**
+
+| Metric | Global | Local | Advantage |
+|--------|--------|-------|-----------|
+| Completed | 32,987 | 17,946 | **83.8% more** |
+| Dropped | 20% | **57%** | |
+| TTFT mean | 42s | **94s** | **2.2× faster** |
+
+Global completes **84% more requests** in the same 20 minutes.
 
 ---
 
@@ -78,15 +111,19 @@ At 1 worker: identical (no cross-worker migration). At 2+ workers: local L3A col
 
 ![Single Worker 20min](../plots/heavy_coding/single_worker_20min.png)
 
-With a single worker, there's no session migration — all objects stay local. **Hit rate: 99.8%.**
+With a single worker, no session migration — all objects stay local. **Hit rate: 99.8%.**
 
-Key observations:
-- **L1 occupancy fluctuates** (33-60%) — coding objects are large (8-16 GB) relative to 80 GB L1, so a few objects fill it
-- **L2 saturates at 100%** within minutes — 1 TB can't hold the growing working set
-- **L3A becomes the primary cache** — most lookups eventually find objects in SSD
-- **Slot utilization near 100%** — coding prefills take 14-17s, keeping slots busy
-- **Recompute fraction ~31%** — each turn adds 8-15k new tokens (user message + tool output), even with 95% prefix stability
-- **TTFT**: L1 hits ~100ms, L3A hits ~1-5s, cold misses ~17s
+```
+Tier saturation: L1=61%  L2=100%  L3A=100%
+Prefill:  mean=13.4s  median=8.4s  p95=45.4s
+Queue wait: mean=51s  median=45s  p95=115s
+Slot utilization: 100%
+```
+
+- **L2 and L3A saturated at 100%** — the 47 TB working set vastly exceeds storage
+- **Prefill p95 = 45s** — large agentic_coding contexts (50-100k tokens) take 37-120s
+- **Slot utilization 100%** — all 256 slots (32/GPU × 8) are always busy
+- **Recompute fraction ~31%** — 8-15k new tokens per turn, even with 95% prefix stability
 
 ---
 
@@ -94,57 +131,46 @@ Key observations:
 
 ![Multi Worker 20min](../plots/heavy_coding/multi_worker_20min.png)
 
-Global (green) vs Local (orange, dashed) — same hardware, different L3A mode.
+Global (green solid) vs Local (orange dashed) — same hardware, different L3A mode.
 
 Key observations:
-- **L1/L2/L3A occupancy identical** — both modes use the same per-worker storage, both saturated (~100% L2/L3A)
-- **Queue depth identical** — both modes are equally saturated (~4000 depth, near max). The system is throughput-limited regardless of cache mode
-- **Slot utilization identical** — both near 100%. Every slot is busy whether doing a cache-hit prefill or a cold-miss recompute
-- **The difference is invisible in infrastructure metrics.** Global and local look identical in occupancy, queue depth, and utilization. The 73pt hit rate gap shows up only in **what each slot computes**: global slots do partial recompute (cache hit, fast), local slots do full recompute (cold miss, 14-17s). Same slot utilization, vastly different useful throughput.
+- **L1/L2/L3A occupancy identical** — both saturated, same per-worker storage
+- **Queue depth diverges** — local queue depth grows higher as cold misses (37-120s each) block slots, cascading into longer waits for all subsequent requests
+- **Slot utilization both 100%** — but global slots do useful work (cache hits), local slots waste time on full recomputes
+- **Cold evictions**: global has more (13,849 vs 3,492) — global L3A churns objects across workers; local has fewer evictions but the evicted objects cause catastrophic cold misses
 
-**Why don't the per-epoch plots show the difference?** Because per-epoch infrastructure metrics (occupancy, queue depth, slot utilization) measure *resource consumption*, not *request-level performance*. Both modes saturate all slots and queues equally. The difference shows up in **TTFT by cache hit type**:
-
-| Component | Global TTFT (mean) | Global Count | Local TTFT (mean) | Local Count |
-|-----------|-------------------|-------------|-------------------|-------------|
-| L1 hit | 4.8s | 10,779 | 6.4s | 19,881 |
-| L3A hit | 31.6s | 23,363 | 33.3s | 5,332 |
-| Cold miss | 16.6s | 21 | **52.8s** | **7,195** |
-
-*(5-min sim, 4 workers)*
-
-Key observations:
-- **Local cold misses take 52.8s** average TTFT (vs global's 16.6s for the rare cold miss). The 52.8s includes both the 17s recompute AND the cascading queue wait from other cold misses blocking slots.
-- **Local has 7,195 cold misses** vs global's 21 — a 340× increase.
-- **Local has more L1 hits** (19,881 vs 10,779) because when sessions re-land on the same worker after a cold miss, the freshly recomputed KV goes into L1 — but this is wasted work since the KV already existed in another worker's L3A.
-- **The `prefill_duration` metric (compute only, no queue wait)** is similar for both modes (~7.5s) because it doesn't capture the cascading queue delay. The real impact shows in TTFT, which includes queue wait.
-
-Dispatch stats at 20 min:
-- Global: 878 affinity, 824,278 non-affinity (0.1% affinity)
-- Local: 194,950 affinity, 630,206 non-affinity (24% affinity)
+Dispatch stats:
+- Global: 890 affinity (0.1%), 824,266 non-affinity — near-total session migration
+- Local: 539,089 affinity (65%), 286,067 non-affinity — higher affinity because cold misses recompute KV locally, creating temporary L1/L2 affinity
 
 ---
 
 ## 4. Session Migration
 
-### Why Sessions Migrate
+### Mechanism
 
-The push dispatcher routes requests to nodes with cache affinity (session's KV in L1/L2). But:
-1. L1 (80 GB/GPU) and L2 (1 TB/worker) saturate within minutes
-2. Objects are evicted to L3A via TTL or pressure
-3. Once in L3A, the affinity check **no longer detects them** (it only checks L1/L2)
-4. The session loses affinity → next request dispatched to any available node
-5. At steady state, **97-99% of dispatches are non-affinity**
+1. **L1/L2 saturate within minutes.** L2 (1 TB/worker) fills at ~5 min.
+2. **Objects evict to L3A.** Via TTL or pressure.
+3. **Affinity lost.** Dispatch affinity only checks L1/L2. Once in L3A, no affinity signal.
+4. **Session scatters.** 97-99% of dispatches are non-affinity at steady state.
+5. **Local L3A = cold miss.** New worker's SSD doesn't have the KV. Full recompute: 37-120s.
+6. **Global L3A = cache hit.** Pooled SSD has the KV. Transfer + partial compute: 5-15s.
 
-### Impact
+### Cost Per Request
 
-Each migrated request with local L3A is a **cold miss** (14-17s full recompute) because the new worker's SSD doesn't have the KV. With 97% non-affinity dispatch, this means 97% of requests recompute from scratch.
+| Context Size | Cache Hit (transfer + partial) | Cold Miss (full recompute) | Savings |
+|-------------|-------------------------------|---------------------------|---------|
+| 30k coding | 4.5s | 14.9s | 70% |
+| 50k agentic | 9.5s | 37.0s | 74% |
+| 80k agentic | 13.1s | 111.2s | **88%** |
+| 100k agentic | 16.8s | 120.7s | **86%** |
 
 ### Mitigations
 
 | Approach | Benefit | Cost |
 |----------|---------|------|
-| **Global L3A** | 99.8% hit rate, any worker finds any KV | 50ms remote latency (negligible vs 14s compute) |
-| **L3A-aware affinity** | Route to worker whose SSD has the KV | Cross-worker L3A lookup at dispatch time |
+| **Global L3A** (recommended) | 99.8% hit rate from any worker | 50ms + transfer time per L3A access |
+| **L3A-aware affinity** | Route to worker whose SSD has KV | Cross-worker L3A lookup at dispatch |
 | **Session pinning** | Avoid migration entirely | Sacrifices load balancing |
 
 ---
@@ -153,15 +179,13 @@ Each migrated request with local L3A is a **cold miss** (14-17s full recompute) 
 
 | Finding | Evidence |
 |---------|----------|
-| **Global L3A is essential** for multi-worker deployments | 99.8% vs 26.6% hit rate at 20 min (73pt gap) |
-| **Session migration is the mechanism** | 97% non-affinity dispatch at steady state |
-| **Infrastructure metrics don't show the gap** | Queue depth, slot utilization, occupancy identical. Both drop 88.7% of requests. The gap is in useful work per completed request. |
-| **System is severely overloaded** | Arrival 693/s vs throughput 78/s. 88.7% of requests dropped. Queue wait p95 (~70-80s) is noise on permanently-full queues. |
-| **Prefill compute is the throughput bottleneck** | Mean 7.5s/request, 1024 slots → max ~137/s theoretical, actual 78/s |
-| **L1 is critical but temporary** | 98% L1 hits at 1 min, saturates by 5 min |
-| **50ms global L3A latency is negligible** | <0.3% overhead on 7.5s mean prefill |
-| **TTL has no impact** on global vs local | Both modes insensitive to L2 TTL (10-300s) |
-| **Recompute fraction ~31% is structural** | Driven by 8-15k new input tokens/turn, not instability |
+| **Global L3A is essential** | 99.8% vs 68.6% hit rate at 20 min; 84% more completed requests |
+| **Session migration is the cause** | 97% non-affinity dispatch; local L3A can't serve migrated sessions |
+| **Queue wait explodes without global L3A** | Global 2.7s vs local 50.8s mean queue wait (19×) at controlled load |
+| **Cold miss cost is massive** | 37-120s full recompute vs 5-15s cache hit (70-88% savings) |
+| **Infrastructure metrics mask the gap** | Occupancy, slot utilization identical — the difference is in TTFT and throughput |
+| **TTL has no impact** | Hit rate insensitive to L2 TTL (10-300s) for both modes |
+| **Recompute fraction ~31% is structural** | 8-15k new input tokens per turn, not prefix instability |
 
 ## Reproduction
 
@@ -169,16 +193,23 @@ Each migrated request with local L3A is a **cold miss** (14-17s full recompute) 
 # Generate all 20-min analysis plots
 python scripts/heavy_coding_analysis.py
 
-# Quick comparison (programmatic)
+# Run controlled load test
+python -c "
 from sim.config import SimConfig
 from sim.engine import SimEngine
-config = SimConfig.from_json("configs/heavy_coding.json")
-config.sim_duration_s = 1200.0  # 20 min
-config.warmup_s = 10.0
-config.sim_start_time_s = 36000.0
-config.service.n_prefill_nodes = 32  # 4 workers × 8 GPUs
-config.service.n_gpus_per_worker = 8
-config.service.l3a_shared = True  # or False for local
-metrics = SimEngine(config).run()
-print(metrics.report())
+import copy
+cfg = SimConfig.from_json('configs/heavy_coding.json')
+cfg.sim_duration_s = 1200.0; cfg.warmup_s = 10.0; cfg.sim_start_time_s = 36000.0
+cfg.service.n_prefill_nodes = 32; cfg.service.n_gpus_per_worker = 8
+for p in cfg.profiles: p.arrival_rate_peak = 3  # controlled load
+for shared in [True, False]:
+    c = copy.deepcopy(cfg)
+    c.service.l3a_shared = shared
+    c.service.l3a_remote_latency_us = 50000 if shared else 0
+    m = SimEngine(c).run()
+    label = 'Global' if shared else 'Local'
+    total = sum(m.savings_events.values())
+    miss = m.savings_events.get('COLD_MISS', 0)
+    print(f'{label}: hit={1-miss/total:.1%} completed={len(m.queue_wait_us)}')
+"
 ```
