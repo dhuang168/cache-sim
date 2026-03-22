@@ -80,6 +80,14 @@ These are **mandatory** — must all pass before any exploratory run. They test 
 7. `test_ttl_migrations_separate_from_pressure` — eviction counters are independent
 8. `test_no_global_l3a_penalty_single_worker` — no remote penalty with 1 worker
 
+### Block Allocation Tests (`tests/test_blocks.py`)
+21 tests for token block math and cache hit granularity:
+- Block count at 16/256/4096 token sizes, exact fit, legacy mode
+- Block boundary rounding (cached tokens rounded to full blocks)
+- Fragmentation (wasted bytes per block size)
+- Integration sims at different block sizes
+- Granularity tradeoff: larger blocks → higher recompute fraction
+
 ### Multi-Node Tests (`tests/test_multinode.py`)
 14 tests covering multi-node dispatch, worker topology, and L3A isolation:
 1. `test_single_node_backward_compat` — N=1 produces valid metrics, no dispatch tracking

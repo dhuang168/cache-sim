@@ -10,6 +10,7 @@ from sim.events import Event, EventType, RequestState, validate_transition
 from sim.cache import (
     CacheObject, PrefixTrie, TierStore, Tier, BlockLayout,
     kv_size_bytes, allocated_blocks, TIER_TO_LAYOUT,
+    cached_tokens_at_block_boundary,
 )
 from sim.service import ServiceModel
 from sim.workload import WorkloadSynthesizer
@@ -422,7 +423,10 @@ class SimEngine:
         )) if sess else 1
         turn = payload.get("turn", 1)
         stability = self.workload.prefix_stability(profile, turn, estimated_turns)
-        cached_tokens = int(total_context * stability)
+        cached_tokens_raw = int(total_context * stability)
+        # Round to block boundary — only full token blocks count as cached
+        block_size_tok = self.config.cache.block_size_tokens
+        cached_tokens = cached_tokens_at_block_boundary(cached_tokens_raw, block_size_tok)
         uncached_tokens = max(1, total_context - cached_tokens + input_tokens)
 
         # ─── Dispatch: pick a node ───

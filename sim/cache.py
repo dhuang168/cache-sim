@@ -115,6 +115,35 @@ class TierStore:
         return total
 
 
+def token_blocks(total_tokens: int, block_size_tokens: int) -> int:
+    """Number of token blocks needed. 0 block_size = legacy (1 block = whole object)."""
+    if block_size_tokens <= 0:
+        return 1
+    return math.ceil(total_tokens / block_size_tokens)
+
+
+def cached_tokens_at_block_boundary(cached_tokens: int, block_size_tokens: int) -> int:
+    """Round cached tokens DOWN to the nearest block boundary.
+    Only full blocks count as cached — partial blocks must be recomputed.
+    With block_size=0 (legacy), no rounding."""
+    if block_size_tokens <= 0:
+        return cached_tokens
+    full_blocks = cached_tokens // block_size_tokens
+    return full_blocks * block_size_tokens
+
+
+def block_fragmentation(total_tokens: int, block_size_tokens: int, model: ModelConfig) -> tuple[int, int]:
+    """Compute (useful_bytes, wasted_bytes) for token-block allocation.
+    Returns (0, 0) for legacy mode."""
+    if block_size_tokens <= 0:
+        return kv_size_bytes(total_tokens, model), 0
+    n_blocks = token_blocks(total_tokens, block_size_tokens)
+    allocated_tokens = n_blocks * block_size_tokens
+    useful = kv_size_bytes(total_tokens, model)
+    allocated = kv_size_bytes(allocated_tokens, model)
+    return useful, allocated - useful
+
+
 class PrefixTrie:
     """
     Prefix matcher mapping token-sequence prefixes to CacheObject keys.

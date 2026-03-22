@@ -58,6 +58,12 @@ class ServiceConfig:
 
 
 @dataclass
+class CacheConfig:
+    block_size_tokens: int = 0  # 0=legacy (whole object), 16=vLLM, 256=OpenAI, 4096=page-aligned
+    block_alignment: str = "fixed"  # "fixed" (uniform blocks) or "message" (Anthropic-style breakpoints)
+
+
+@dataclass
 class SimConfig:
     run_id: str
     seed: int
@@ -73,6 +79,7 @@ class SimConfig:
     sim_duration_s: float
     warmup_s: float
     epoch_report_interval_s: float
+    cache: CacheConfig = field(default_factory=CacheConfig)
     sim_start_time_s: float = 0.0  # wall-clock offset for diurnal rate (0=midnight, 32400=9AM)
     enable_suffix_cache: bool = False
     enable_l3b_object_store: bool = False
@@ -86,6 +93,8 @@ class SimConfig:
         raw["model"] = ModelConfig(**raw["model"])
         raw["profiles"] = [WorkloadProfile(**p) for p in raw["profiles"]]
         raw["service"] = ServiceConfig(**raw["service"])
+        if "cache" in raw:
+            raw["cache"] = CacheConfig(**raw["cache"])
         return cls(**raw)
 
     def to_json(self, path: str) -> None:
