@@ -11,14 +11,14 @@
     },
     {
       "name": "L2",
-      "capacity_bytes": 4398046511104,
+      "capacity_bytes": 1099511627776,
       "bandwidth_bytes_per_s": 64000000000,
       "latency_floor_us": 10,
       "block_size_bytes": 33554432
     },
     {
       "name": "L3A",
-      "capacity_bytes": 21990232555520,
+      "capacity_bytes": 8796093022208,
       "bandwidth_bytes_per_s": 7000000000,
       "latency_floor_us": 100,
       "block_size_bytes": 268435456

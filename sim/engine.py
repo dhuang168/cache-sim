@@ -75,10 +75,13 @@ class SimEngine:
             n_workers = n_nodes // gpus_per_worker
         self._n_workers = n_workers
 
-        # L3A setup: shared (global) or per-worker (local)
+        # L3A config value = per-worker SSD capacity
+        # Global mode: pool all workers' SSDs → total = per_worker × n_workers
+        # Local mode: each worker uses its own SSD → per_worker capacity
         l3a_cfg = config.tiers[2]
         if self._l3a_shared:
-            self._shared_l3a = TierStore(l3a_cfg.name, l3a_cfg.capacity_bytes, l3a_cfg.block_size_bytes)
+            global_cap = l3a_cfg.capacity_bytes * n_workers
+            self._shared_l3a = TierStore(l3a_cfg.name, global_cap, l3a_cfg.block_size_bytes)
         else:
             self._shared_l3a = None  # no global L3A in local mode
 
@@ -93,8 +96,7 @@ class SimEngine:
             l2 = TierStore(l2_cfg.name, l2_cfg.capacity_bytes, l2_cfg.block_size_bytes)
             self._worker_l2_stores.append(l2)
             if not self._l3a_shared:
-                local_cap = l3a_cfg.capacity_bytes // n_workers
-                local_l3a = TierStore(l3a_cfg.name, local_cap, l3a_cfg.block_size_bytes)
+                local_l3a = TierStore(l3a_cfg.name, l3a_cfg.capacity_bytes, l3a_cfg.block_size_bytes)
                 self._worker_l3a_stores.append(local_l3a)
             else:
                 self._worker_l3a_stores.append(None)
@@ -499,8 +501,8 @@ class SimEngine:
         if hit_tier and hit_tier != Tier.L1 and kv_bytes > 0:
             tier_cfg = self.config.tiers[[Tier.L1, Tier.L2, Tier.L3A].index(hit_tier)]
             t_transfer = transfer_time_us(kv_bytes, tier_cfg)
-            # Add remote latency for global L3A access
-            if hit_tier == Tier.L3A and self._l3a_shared and n_nodes > 1:
+            # Add remote latency for global L3A access (only when multiple workers exist)
+            if hit_tier == Tier.L3A and self._l3a_shared and self._n_workers > 1:
                 t_transfer += self.config.service.l3a_remote_latency_us
             worthwhile = is_cache_worthwhile(
                 kv_bytes, tier_cfg, uncached_tokens, self.prefill_oracle

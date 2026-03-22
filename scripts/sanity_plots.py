@@ -212,14 +212,14 @@ def plot_recompute_fraction(metrics):
 
 def stressed_config() -> SimConfig:
     """
-    Constrained scenario: L1 too small to hold most KV objects,
-    forcing placement directly into L2. Short TTLs drive L3A hibernation.
+    Constrained scenario forcing multi-tier activity in short sims.
+    All capacities are per-worker (L3A = per-worker SSD).
     """
     cfg = short_config()
     cfg.run_id = "stressed"
-    cfg.tiers[0].capacity_bytes = 500 * 1024**2        # 500 MB L1 — can't hold a 2048-token KV (~670MB)
-    cfg.tiers[1].capacity_bytes = 10 * 1024**3          # 10 GB L2
-    cfg.tiers[2].capacity_bytes = 50 * 1024**3          # 50 GB L3A
+    cfg.tiers[0].capacity_bytes = 500 * 1024**2        # 500 MB L1 per GPU — can't hold coding KV
+    cfg.tiers[1].capacity_bytes = 10 * 1024**3          # 10 GB L2 per worker
+    cfg.tiers[2].capacity_bytes = 50 * 1024**3          # 50 GB L3A per worker SSD
     cfg.ttl_l2_s = 20.0
     cfg.ttl_l3a_s = 120.0
     cfg.eviction_hbm_threshold = 0.6

@@ -166,7 +166,7 @@ Added for multi-node prefill dispatch (all have backward-compatible defaults):
 **Tier capacity semantics:**
 - L1 capacity: **per-GPU** (each GPU has own HBM)
 - L2 capacity: **per-worker** (shared by `n_gpus_per_worker` GPUs on the same host)
-- L3A capacity: **global** when shared, **per-worker** when local
+- L3A capacity: **per-worker SSD** — Global mode pools all workers: `total = per_worker × n_workers`. Local mode: each worker uses its own SSD.
 - `n_prefill_nodes` must be divisible by `n_gpus_per_worker` (or equal to 1)
 - Existing `n_prefill_slots` and `prefill_queue_max` are **per-GPU**
 
