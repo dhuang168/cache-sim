@@ -23,28 +23,28 @@
 
 5. **The 5-min sim is too short for session migration.** At 5 min with peak=3, L1/L2 are not saturated yet. The global L3A advantage (cross-worker access after migration) hasn't kicked in. This matches earlier findings: global L3A's advantage requires 10-20 min for L1/L2 to fill and sessions to migrate.
 
-## 20-Minute Results (Steady State)
+## 20-Minute Results (Steady State, corrected contention model)
+
+**Contention model fix**: Global L3A = N workers' SSDs pooled. Concurrent reads to different objects on different SSDs don't contend. Per-SSD contention = `total_concurrent / n_workers`. Additionally, L3A reads populate local L1 — subsequent requests use L1 (no repeated SSD reads).
 
 At 20 min, L1/L2 saturate and session migration reveals the true tradeoff:
 
-| Sharing | L3A Mode | Hit Rate | Miss | Dropped | Completed | QW Mean | TTFT Mean | TTFT p95 | Mem Saved | Contention |
-|---------|---------|----------|------|---------|-----------|---------|-----------|----------|-----------|------------|
-| Off | Global | **99.8%** | 61 | **88%** | 2,927 | 72s | 149s | 737s | — | 21,498 |
-| Off | Local | 77.1% | 5,708 | 40% | **14,828** | 50s | 79s | 299s | — | 0 |
-| On | Global | **99.8%** | 61 | **89%** | 2,809 | 70s | 148s | 755s | 10,301 GB | 20,703 |
-| On | Local | 78.0% | 5,471 | 40% | **14,892** | 49s | **78s** | **297s** | **69,766 GB** | 0 |
+| L3A Mode | Hit Rate | Miss | Dropped | Completed | QW Mean | TTFT Mean | Contention |
+|---------|----------|------|---------|-----------|---------|-----------|------------|
+| **Global** | **99.8%** | 61 | **4%** | **23,781** | **2.8s** | **25.6s** | 493 |
+| Local | 78.0% | 5,471 | 40% | 14,892 | 48.6s | 78.2s | 0 |
+
+*(With sharing enabled, LRU eviction, peak=3)*
 
 ### Key Findings at 20 min
 
-1. **Global L3A has 99.8% hit rate but 88-89% drop rate.** The bandwidth contention (20K+ events) makes global L3A transfers so slow that prefill slots are occupied much longer → queues fill → 88% of requests dropped. Only 2,809-2,927 requests complete out of ~25K total.
+1. **Global L3A wins decisively.** 99.8% hit rate, 4% drops, 60% more completed requests (23.8K vs 14.9K), 3× better TTFT (25.6s vs 78.2s).
 
-2. **Local L3A completes 5× more requests** (14,828 vs 2,927) despite lower hit rate (77% vs 99.8%). The dedicated SSD bandwidth per worker (no contention) means each L3A transfer is fast → slots free quickly → lower drop rate (40% vs 88%).
+2. **Corrected contention is modest.** Only 493 contention events (was 22K with wrong model). Objects are distributed across N workers' SSDs, so concurrent reads to different objects don't contend. First L3A read populates local L1 — subsequent requests use L1 (no repeated SSD reads).
 
-3. **Sharing saves 70 TB with local L3A.** The framework and workspace prefixes are ref-counted within each worker. With 4 workers × many sessions, the cumulative savings are massive.
+3. **Local L3A's 40% drop rate** is caused by cold misses (78% hit rate). Each cold miss takes 37-120s, blocking slots and cascading into queue buildup. Global L3A avoids this with 99.8% hit rate.
 
-4. **The hit rate vs throughput tradeoff is real.** Global L3A wins on hit rate (99.8%) but loses on throughput (2.8K completed). Local L3A loses on hit rate (78%) but wins on throughput (14.9K completed). The cold misses with local L3A cost 37-120s each, but the lack of contention means more requests get served overall.
-
-5. **Contention is the deciding factor, not hit rate.** At 20 min, global L3A has 20K+ contention events. Each contention multiplies the SSD transfer time by the number of concurrent readers. With many sessions accessing the framework prefix via global L3A simultaneously, the effective bandwidth per reader drops to a fraction of the 7 GB/s SSD.
+4. **Sharing saves memory** but doesn't change the hit rate story at this scale. The real benefit of sharing appears in memory capacity planning for large deployments.
 
 ### Why the 5-min and 20-min results differ
 
@@ -68,7 +68,4 @@ The **optimal L3A strategy depends on both time horizon AND contention**:
 - **Long-term, low contention**: Global L3A wins — cross-worker access after session migration
 - **Long-term, high contention**: Local L3A wins on throughput despite lower hit rate — bandwidth contention on global L3A is the bottleneck, not cache misses
 
-**The real solution** is to combine global L3A's hit rate with local L3A's bandwidth:
-- **Replicate hot blocks** to each worker's local SSD (like the LRU self-regulation in L1/L2)
-- **L3A-aware affinity dispatch**: route sessions back to the worker that has their KV in local SSD
-- **Tiered global L3A**: use global for cold blocks only, keep hot blocks local
+With the corrected contention model (per-SSD, not global), **global L3A is the clear winner** for multi-worker coding deployments. The 50ms remote latency + modest contention is a small price for 99.8% hit rate and 60% more throughput.

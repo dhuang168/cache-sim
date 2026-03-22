@@ -31,8 +31,20 @@
 
 6. **Load balance slightly better with pull** (std 60 vs 65). Nodes self-select based on availability → natural load balancing.
 
+## 20-Minute Results (with per-SSD contention fix)
+
+At 20 min with global L3A and corrected contention model, the algorithms converge:
+
+| Algorithm | Completed | QW Mean | TTFT Mean | Contention |
+|-----------|-----------|---------|-----------|------------|
+| push | 23,781 | 2.8s | 25.6s | 493 |
+| push_smart | 23,784 | 2.9s | 25.7s | 577 |
+| **pull** | **23,893** | **2.6s** | **25.3s** | **295** |
+
+Pull still edges out push (+0.5% completed, -10% contention, -8% queue wait), but the gap is much smaller at 20 min than at 5 min. Smart push is comparable to basic push — L3A-aware routing doesn't help much when global L3A hit rate is already 99.8%.
+
 ## Recommendation
 
-**Pull dispatch should be the default for multi-worker deployments.** It eliminates queueing, drops, and achieves higher affinity — all with no downside at this load level.
+**Pull dispatch is preferred** — it consistently outperforms push at all durations with no downside. The advantage is largest at 5 min (14% faster TTFT, zero drops) and narrows at 20 min (2% better) as global L3A absorbs most of the cache benefit regardless of dispatch strategy.
 
-The 14% TTFT improvement compounds with more workers and higher load: push's 10% drop rate means 10% of users get no response, while pull serves everyone.
+Smart push doesn't significantly improve over basic push because the bottleneck is compute time (14-17s per coding request), not dispatch quality.

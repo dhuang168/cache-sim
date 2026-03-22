@@ -18,7 +18,7 @@ from sim.oracle import PrefillOracle, DecodeOracle, transfer_time_us, is_cache_w
 from sim.eviction import EvictionEngine
 from sim.metrics import MetricsCollector
 from sim.node import PrefillNode
-from sim.dispatch import PushDispatcher, PullDispatcher
+from sim.dispatch import PushDispatcher, SmartPushDispatcher, PullDispatcher
 
 
 # Resolve benchmark table path relative to package
@@ -143,6 +143,11 @@ class SimEngine:
         # Dispatcher
         if config.service.dispatch_algorithm == "pull":
             self.dispatcher = PullDispatcher(self.nodes)
+        elif config.service.dispatch_algorithm == "push_smart":
+            self.dispatcher = SmartPushDispatcher(
+                self.nodes,
+                l3a_store=self._shared_l3a if self._l3a_shared else None,
+            )
         else:
             self.dispatcher = PushDispatcher(self.nodes)
 
@@ -172,6 +177,7 @@ class SimEngine:
         self.request_arrival_us: dict[str, int] = {}
         self._request_queued_at_us: dict[str, int] = {}  # request_id -> time entered pending queue
         self._concurrent_l3a_reads: int = 0  # in-flight L3A transfers at any moment
+        self._l3a_warming_objects: set[str] = set()  # cache_keys currently being transferred from L3A
         self._id_counter: int = 0
 
         # Profile lookup cache (avoid linear scan per request)
@@ -533,17 +539,21 @@ class SimEngine:
             # Add remote latency for global L3A access (only when multiple workers exist)
             if hit_tier == Tier.L3A and self._l3a_shared and self._n_workers > 1:
                 t_transfer += self.config.service.l3a_remote_latency_us
-                # Bandwidth contention: N concurrent readers share one SSD's bandwidth
-                # effective_bw = ssd_bandwidth / N → transfer_time = size * N / bandwidth
-                self._concurrent_l3a_reads += 1
-                n_readers = self._concurrent_l3a_reads
-                if n_readers > 1:
-                    # Recompute transfer with contended bandwidth
-                    # t_transfer = latency_floor + remote_latency + size * N / bandwidth
+                # Bandwidth contention model:
+                # Global L3A = N workers' SSDs pooled. Objects distributed across SSDs.
+                # Concurrent reads to the SAME SSD contend; different SSDs don't.
+                # Approximate: per-SSD contention = total_concurrent / n_workers
+                warming_key = f"{hit_key}:w{assigned_node_id // self._gpus_per_worker}"
+                if warming_key not in self._l3a_warming_objects:
+                    self._l3a_warming_objects.add(warming_key)
+                    self._concurrent_l3a_reads += 1
+                # Per-SSD contention (objects distributed across N workers' SSDs)
+                per_ssd_readers = max(1, self._concurrent_l3a_reads // self._n_workers)
+                if per_ssd_readers > 1:
                     t_transfer = (
                         tier_cfg.latency_floor_us
                         + self.config.service.l3a_remote_latency_us
-                        + int((kv_bytes / tier_cfg.bandwidth_bytes_per_s) * n_readers * 1_000_000)
+                        + int((kv_bytes / tier_cfg.bandwidth_bytes_per_s) * per_ssd_readers * 1_000_000)
                     )
                     if collecting:
                         self.metrics.l3a_bandwidth_contention_events += 1
@@ -648,8 +658,13 @@ class SimEngine:
         payload = event.payload or {}
 
         # Release L3A bandwidth (if this was an L3A-sourced prefill)
-        if payload.get("ttft_component") in ("L3A_hit",) and self._concurrent_l3a_reads > 0:
+        if payload.get("ttft_component") == "L3A_hit" and self._concurrent_l3a_reads > 0:
             self._concurrent_l3a_reads -= 1
+            # Clean up warming set for this object+worker
+            hit_key = payload.get("hit_key", "")
+            node_id = payload.get("node_id", 0)
+            warming_key = f"{hit_key}:w{node_id // self._gpus_per_worker}"
+            self._l3a_warming_objects.discard(warming_key)
 
         # FSM: PREFILLING -> DECODE_QUEUED
         self._transition(request_id, RequestState.DECODE_QUEUED)

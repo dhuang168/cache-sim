@@ -41,6 +41,75 @@ class PushDispatcher:
         )
 
 
+class SmartPushDispatcher:
+    """Predictive push dispatcher with full tier visibility.
+    Scores each node by expected_total = expected_wait + expected_prefill.
+    Considers L1, L2, AND L3A affinity (not just L1/L2)."""
+
+    def __init__(self, nodes: list[PrefillNode], l3a_store=None):
+        self.nodes = nodes
+        self.l3a_store = l3a_store  # global L3A store (or None for local)
+
+    # Cost estimates (relative, in microseconds) for scoring
+    L1_HIT_COST = 100_000       # 0.1s — L1 is fast
+    L2_HIT_COST = 2_000_000     # 2s — L2 transfer + partial compute
+    L3A_HIT_COST = 15_000_000   # 15s — L3A transfer + partial compute
+    COLD_MISS_COST = 60_000_000 # 60s — full recompute for coding workloads
+
+    def _cache_tier_for_session(self, session_id: str, node: PrefillNode) -> str:
+        """Check which tier has this session's KV on this node's worker."""
+        for obj in node.l1_store.objects.values():
+            if obj.session_id == session_id:
+                return "L1"
+        for obj in node.l2_store.objects.values():
+            if obj.session_id == session_id:
+                return "L2"
+        # Check L3A — local or global
+        if node.l3a_store:
+            for obj in node.l3a_store.objects.values():
+                if obj.session_id == session_id:
+                    return "L3A_local"
+        if self.l3a_store:
+            for obj in self.l3a_store.objects.values():
+                if obj.session_id == session_id:
+                    return "L3A_global"
+        return "miss"
+
+    def _expected_prefill_cost(self, tier: str) -> int:
+        if tier == "L1":
+            return self.L1_HIT_COST
+        elif tier == "L2":
+            return self.L2_HIT_COST
+        elif tier in ("L3A_local", "L3A_global"):
+            return self.L3A_HIT_COST
+        return self.COLD_MISS_COST
+
+    def dispatch(
+        self,
+        session_id: str,
+        request_id: str,
+        payload: dict,
+        current_us: int,
+    ) -> PrefillNode:
+        """Pick node with lowest expected total time (wait + prefill)."""
+        best_node = None
+        best_score = float('inf')
+
+        for node in self.nodes:
+            wait_us = node.projected_free_time_us(current_us) - current_us
+            wait_us = max(0, wait_us) + len(node.pending_prefills) * 5_000_000  # ~5s per queued item
+
+            tier = self._cache_tier_for_session(session_id, node)
+            prefill_cost = self._expected_prefill_cost(tier)
+
+            total = wait_us + prefill_cost
+            if total < best_score:
+                best_score = total
+                best_node = node
+
+        return best_node or self.nodes[0]
+
+
 class PullDispatcher:
     """Global-queue pull dispatcher with affinity scoring."""
 
