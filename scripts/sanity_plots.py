@@ -213,18 +213,21 @@ def plot_recompute_fraction(metrics):
 
 def stressed_config() -> SimConfig:
     """
-    Constrained scenario forcing multi-tier activity in short sims.
-    All capacities are per-worker (L3A = per-worker SSD).
+    For custom configs (--config), use their hardware values with shortened sim.
+    For default config, apply small-capacity overrides to force multi-tier activity.
     """
     cfg = short_config()
     cfg.run_id = "stressed"
-    cfg.tiers[0].capacity_bytes = 500 * 1024**2        # 500 MB L1 per GPU — can't hold coding KV
-    cfg.tiers[1].capacity_bytes = 10 * 1024**3          # 10 GB L2 per worker
-    cfg.tiers[2].capacity_bytes = 50 * 1024**3          # 50 GB L3A per worker SSD
-    cfg.ttl_l2_s = 20.0
-    cfg.ttl_l3a_s = 120.0
-    cfg.eviction_hbm_threshold = 0.6
-    cfg.eviction_ram_threshold = 0.8
+    if CONFIG_PATH == _DEFAULT_CONFIG:
+        # Default config: apply stressed overrides to force multi-tier activity
+        cfg.tiers[0].capacity_bytes = 500 * 1024**2        # 500 MB L1 per GPU
+        cfg.tiers[1].capacity_bytes = 10 * 1024**3          # 10 GB L2 per worker
+        cfg.tiers[2].capacity_bytes = 50 * 1024**3          # 50 GB L3A per worker SSD
+        cfg.ttl_l2_s = 20.0
+        cfg.ttl_l3a_s = 120.0
+        cfg.eviction_hbm_threshold = 0.6
+        cfg.eviction_ram_threshold = 0.8
+    # Custom configs: use their own hardware values as-is
     return cfg
 
 
