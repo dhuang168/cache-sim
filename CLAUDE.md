@@ -69,6 +69,17 @@ These are **mandatory** — must all pass before any exploratory run. They test 
 - `test_kv_size.py` — KV size math, block allocation, fragmentation
 - `test_oracle.py` — Prefill/decode oracle correctness, transfer time calculation
 
+### Config Consistency Tests (`tests/test_config_consistency.py`)
+8 regression tests for bugs found during development:
+1. `test_oracle_covers_workload_range` — oracle table covers max expected context per profile
+2. `test_oracle_monotonically_increasing` — oracle(n+1) ≥ oracle(n)
+3. `test_l2_occupancy_never_exceeds_100` — L2 never exceeds capacity
+4. `test_all_profiles_generate_sessions` — every profile with mix > 0 creates sessions
+5. `test_session_proportions_match_profile_mix` — proportions within ±15%
+6. `test_queue_depth_nonzero_under_load` — queue metric is wired correctly
+7. `test_ttl_migrations_separate_from_pressure` — eviction counters are independent
+8. `test_no_global_l3a_penalty_single_worker` — no remote penalty with 1 worker
+
 ### Multi-Node Tests (`tests/test_multinode.py`)
 14 tests covering multi-node dispatch, worker topology, and L3A isolation:
 1. `test_single_node_backward_compat` — N=1 produces valid metrics, no dispatch tracking
