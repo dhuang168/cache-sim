@@ -41,10 +41,15 @@ Both hypotheses were partially wrong. The actual cause is:
 
 3. **The working set is massive (47TB) but objects are constantly churned**. 5,504 objects compete for 200GB L3A, with heavy eviction (5,538 cold evictions). The 99% hit rate comes from prefix trie matches finding objects that happen to still be resident.
 
-### Conclusion
-SSD capacity sensitivity is invisible at realistic hardware because **L2 (1TB) absorbs the entire coding working set**. L3A only becomes the primary cache when L2 is constrained (stressed config). The SSD size cliff appears when L3A per-worker capacity < coding KV object size (~8-16 GB).
+### Conclusion (updated after longer sim analysis)
 
-To see SSD sensitivity at realistic hardware, you would need:
-- Much longer sim duration (hours, not 60s) to accumulate more objects than L2 can hold
-- Higher arrival rate to increase concurrent sessions
-- Or constrained L2 capacity
+Initial conclusion was wrong. L2 does NOT absorb the entire working set — it saturates at 5 min. Both L2 and L3A reach 100% saturation. The real reason global vs local L3A are identical:
+
+**Affinity dispatch keeps each session's objects on its assigned worker.** With push dispatch, once a session is assigned to a worker, all KV objects stay on that worker. Global L3A pooling provides no cross-worker benefit because no session's objects are accessed from a different worker.
+
+At 20 min, each worker places ~740 TB through its 8 TB L3A (93× churn). Both global (32 TB) and local (8 TB/worker) show identical 99.77% hit rate because the access pattern is per-worker, not cross-worker.
+
+Global L3A would help with:
+- Session migration (requests land on different workers)
+- Shared prefix deduplication (one copy serves all workers)
+- Load imbalance (global pool absorbs overflow from busy workers)

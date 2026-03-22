@@ -188,12 +188,34 @@ Investigation of object placement reveals the root cause:
 
 The L2 TTL (300s) is also longer than the sim (60s), so no TTL-driven L2→L3A migration occurs. Even with TTL=10s, only 150 objects migrate.
 
+### Longer Simulation Validation
+
+Longer sims confirm the tiers saturate over time (4 workers × 8 GPUs, realistic hardware):
+
+| Duration | L2 Occupancy | L3A Occupancy | L2→L3A Migrations | Cold Evictions | Miss Rate |
+|----------|-------------|---------------|-------------------|---------------|-----------|
+| 1 min | 75% | 100% | 0 | 0 | 0.09% |
+| 5 min | 100% | 100% | 0 | 25 | 0.19% |
+| 10 min | 100% | 100% | 688 | 1,537 | 0.27% |
+| 20 min | 100% | 99% | 1,409 | 20,613 | 0.23% |
+
+L2 saturates at 5 min, L3A is saturated from the start (objects skip L2 when it's full). By 20 min, 20k cold evictions occur — L3A is churning objects at 93× its capacity.
+
+However, **global vs local L3A remain identical** even at 20 min (both 99.77% hit rate). Per-worker analysis shows each worker places ~740 TB through its 8 TB L3A independently. Sessions are dispatched with affinity — once assigned to a worker, all their objects stay on that worker. Global pooling provides no cross-worker benefit because **no session's objects are accessed from a different worker**.
+
+### When Would Global L3A Help?
+
+Global L3A would outperform local in scenarios with **cross-worker access patterns**:
+- **Session migration**: if a session's later requests land on a different worker (e.g., worker 0 is busy → request routed to worker 1 → needs KV from worker 0's L3A)
+- **Shared prefix deduplication**: many sessions share the same 20-30k system prompt KV. One copy in global L3A could serve all workers instead of each worker storing its own copy.
+- **Load imbalance**: if some workers handle more coding sessions than others, global L3A lets underloaded workers' SSD capacity absorb overflow from overloaded workers.
+
 ### Implications for Production
 
-- **Standard servers (2-8 TB NVMe)**: Local SSD is sufficient because 1TB+ L2 DRAM absorbs most coding objects. L3A is a safety net, not the primary cache.
-- **Constrained L2 environments** (small host DRAM, many GPUs per host): L3A becomes the primary cache, and SSD capacity matters. Global L3A pooling helps.
-- **Longer runtimes** (hours): L2 eventually fills as sessions accumulate. L3A importance grows, and the SSD cliff shifts to higher capacities.
-- **Higher concurrency**: More concurrent coding sessions overwhelm L2 faster, making L3A critical sooner.
+- **Standard servers (2-8 TB NVMe)**: Local SSD is sufficient. With affinity dispatch, sessions stay on their assigned worker.
+- **Session migration scenarios**: Global L3A becomes valuable when requests can land on different workers.
+- **Shared prefix optimization**: Deduplicating system prompt KV across workers is a v2 optimization that would benefit from global L3A.
+- **Longer runtimes** (hours): L3A churn increases but the global/local difference depends on cross-worker access, not capacity.
 
 ## Key Findings
 
@@ -203,7 +225,7 @@ The L2 TTL (300s) is also longer than the sim (60s), so no TTL-driven L2→L3A m
 
 3. **60s sim has not reached steady state.** At 120s, L2 saturation rises to 88% and miss rate doubles. Production deployments running for hours would see significantly more tier pressure — global vs local L3A differences would become more significant.
 
-4. **Global vs local L3A difference is negligible at realistic scale in short sims.** 8TB/worker SSD doesn't overflow in 60-120s. The advantage appears with constrained SSD, longer runtimes, or extreme concurrent session counts.
+4. **Global vs local L3A difference is negligible even at 20-min sims.** Not because of capacity — both L2 and L3A are fully saturated — but because affinity dispatch keeps each session's objects on its assigned worker. Global pooling only helps with cross-worker access patterns (session migration, shared prefix dedup, load imbalance).
 
 5. **L1 is the critical tier.** 98.2% of lookups hit L1 (HBM). L1 capacity directly determines cache effectiveness — below 10GB, coding KV objects can't fit and performance degrades sharply.
 
