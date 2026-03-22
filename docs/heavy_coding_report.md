@@ -153,15 +153,26 @@ This is realistic — in Claude Code, each turn adds 8-15k new tokens (tool outp
 
 ## When Does Global L3A Matter?
 
-The global L3A advantage appears under **constrained SSD capacity** — when per-worker SSD is too small to hold the active coding sessions' KV objects. In prior stressed-config analysis (50GB L3A/worker):
+### Why 8TB Local SSD Is Effective
 
-| Workers | Global Hit | Local Hit | Gap |
-|---------|-----------|----------|-----|
-| 1 | 94.6% | 94.6% | 0% |
-| 2 | 99.1% | 99.0% | +0.1% |
-| 4 | 99.9% | 98.7% | +1.2% |
+With 8TB SSD per worker, local L3A has more than enough capacity for the coding workload's KV objects (8-16 GB each). The full SSD capacity sweep (4 workers × 8 GPUs, stressed L1/L2) shows that **local SSD works well until per-worker capacity drops below ~50GB**:
 
-The gap grows with more workers because local L3A fragments capacity. At extreme scales or with smaller SSDs, the gap would be larger (see `plan_and_progress/global_l3a_advantage_progress_1.md` for 40+ percentage point gaps with 12.5GB/worker).
+| SSD/Worker | Global (pooled) | Local (per-worker) | Winner | Notes |
+|-----------|----------------|-------------------|--------|-------|
+| **8 TB** | 99.9% (32 TB) | **99.9%** (8 TB) | TIE | Production hardware — both have ample capacity |
+| **4 TB** | 99.9% (16 TB) | **99.9%** (4 TB) | TIE | Hypothetical half-SSD — still no pressure |
+| **2 TB** | 99.9% (8 TB) | **99.9%** (2 TB) | TIE | Hypothetical quarter-SSD — working set fits |
+| 200 GB | 99.9% (800 GB) | 99.9% (200 GB) | TIE | Still sufficient per worker |
+| **50 GB** | **99.9%** (200 GB) | 99.0% (50 GB) | **Global** | Local starts overflowing — cliff begins |
+| **25 GB** | **99.2%** (100 GB) | 90.5% (25 GB) | **Global +8.7%** | Local can't hold coding objects |
+| **15 GB** | **96.2%** (60 GB) | 64.6% (15 GB) | **Global +31.6%** | Catastrophic — smaller than 1 agentic_coding KV |
+
+**Key insight**: Local SSD is effective at **8TB, 4TB, and even 2TB** because the working set in a 60s sim is much smaller than any of these. The crossover only appears below ~50GB/worker, where per-worker capacity approaches the size of a single coding KV object (8-16 GB).
+
+In production, this means:
+- **Standard servers (2-8 TB NVMe)**: Local SSD is sufficient. Global L3A adds complexity with no benefit.
+- **Constrained environments** (edge, cost-optimized, or very high concurrent sessions): Global L3A's pooling advantage becomes significant.
+- **Longer runtimes**: The working set grows over time (see simulation duration sensitivity above). At production scale (hours of runtime, thousands of concurrent sessions), the crossover point shifts to higher SSD capacities.
 
 ## Key Findings
 
