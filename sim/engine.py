@@ -160,11 +160,18 @@ class SimEngine:
         self.shared_prefix_trie = PrefixTrie()
         self.session_tries: dict[str, PrefixTrie] = {}
 
+        # Shared block index: sharing_group_key → cache_key
+        # e.g., "framework:coding" → "sp-framework-coding"
+        self._shared_block_index: dict[str, str] = {}
+        # Track which sharing groups each session belongs to (for cleanup)
+        self._session_sharing_groups: dict[str, list[str]] = {}
+
         # Session tracking
         self.sessions: dict[str, SessionState] = {}
         self.request_states: dict[str, RequestState] = {}
         self.request_arrival_us: dict[str, int] = {}
         self._request_queued_at_us: dict[str, int] = {}  # request_id -> time entered pending queue
+        self._concurrent_l3a_reads: int = 0  # in-flight L3A transfers at any moment
         self._id_counter: int = 0
 
         # Profile lookup cache (avoid linear scan per request)
@@ -526,6 +533,15 @@ class SimEngine:
             # Add remote latency for global L3A access (only when multiple workers exist)
             if hit_tier == Tier.L3A and self._l3a_shared and self._n_workers > 1:
                 t_transfer += self.config.service.l3a_remote_latency_us
+                # Bandwidth contention: concurrent reads share SSD bandwidth
+                self._concurrent_l3a_reads += 1
+                if self._concurrent_l3a_reads > self._n_workers:
+                    contention = self._concurrent_l3a_reads / self._n_workers
+                    # Scale the bandwidth portion (not the latency floor)
+                    bandwidth_portion = t_transfer - self.config.service.l3a_remote_latency_us - tier_cfg.latency_floor_us
+                    t_transfer = tier_cfg.latency_floor_us + self.config.service.l3a_remote_latency_us + int(bandwidth_portion * contention)
+                    if collecting:
+                        self.metrics.l3a_bandwidth_contention_events += 1
             worthwhile = is_cache_worthwhile(
                 kv_bytes, tier_cfg, uncached_tokens, self.prefill_oracle
             )
@@ -625,6 +641,10 @@ class SimEngine:
     def _on_prefill_complete(self, event: Event, collecting: bool) -> None:
         request_id = event.request_id
         payload = event.payload or {}
+
+        # Release L3A bandwidth (if this was an L3A-sourced prefill)
+        if payload.get("ttft_component") in ("L3A_hit",) and self._concurrent_l3a_reads > 0:
+            self._concurrent_l3a_reads -= 1
 
         # FSM: PREFILLING -> DECODE_QUEUED
         self._transition(request_id, RequestState.DECODE_QUEUED)
@@ -778,27 +798,33 @@ class SimEngine:
                         cache_key, self.sim_clock_us,
                     )
 
-                # Shared prefix trie
+                # Shared prefix — multi-tier or legacy
                 if profile.shared_system_prefix_tokens > 0:
-                    sp_len = profile.shared_system_prefix_tokens
-                    sp_key = f"sp-{profile.name}"
-
-                    existing_obj = self._find_cache_object(sp_key)
-                    if existing_obj:
-                        existing_obj.ref_count += 1
-                        existing_obj.last_accessed_at_us = self.sim_clock_us
-                    else:
-                        sp_size = kv_size_bytes(sp_len, self.config.model)
-                        self._place_kv_object(
-                            sp_key, "__shared__", profile,
-                            sp_size, sp_len, collecting,
-                            shared_prefix_id=profile.name,
-                            node_id=node_id,
+                    sharing_cfg = self.config.cache.sharing
+                    if sharing_cfg.enabled and sharing_cfg.tiers:
+                        self._place_shared_tiers(
+                            session_id, profile, node_id, collecting,
                         )
-                        if self._find_cache_object(sp_key):
-                            self.shared_prefix_trie.insert(
-                                sp_len, sp_key, self.sim_clock_us,
+                    else:
+                        # Legacy: single shared prefix object
+                        sp_len = profile.shared_system_prefix_tokens
+                        sp_key = f"sp-{profile.name}"
+                        existing_obj = self._find_cache_object(sp_key)
+                        if existing_obj:
+                            existing_obj.ref_count += 1
+                            existing_obj.last_accessed_at_us = self.sim_clock_us
+                        else:
+                            sp_size = kv_size_bytes(sp_len, self.config.model)
+                            self._place_kv_object(
+                                sp_key, "__shared__", profile,
+                                sp_size, sp_len, collecting,
+                                shared_prefix_id=profile.name,
+                                node_id=node_id,
                             )
+                            if self._find_cache_object(sp_key):
+                                self.shared_prefix_trie.insert(
+                                    sp_len, sp_key, self.sim_clock_us,
+                                )
 
         # FSM: KV_WRITE -> COMPLETE
         self._transition(request_id, RequestState.COMPLETE)
@@ -917,6 +943,59 @@ class SimEngine:
     def _on_epoch_report(self, event: Event, collecting: bool) -> None:
         if not collecting:
             return
+
+        # Cleanup expired sessions' shared block ref counts
+        expired_sessions = []
+        for sid, sess in self.sessions.items():
+            if self.sim_clock_us > sess.end_us and sid in self._session_sharing_groups:
+                expired_sessions.append(sid)
+        for sid in expired_sessions:
+            groups = self._session_sharing_groups.pop(sid, [])
+            for group_key in groups:
+                sp_key = self._shared_block_index.get(group_key)
+                if sp_key:
+                    obj = self._find_cache_object(sp_key)
+                    if obj and obj.ref_count > 0:
+                        obj.ref_count -= 1
+
+        # Track cross-worker duplication of shared prefix objects
+        if self._n_workers > 1:
+            from collections import defaultdict
+            # For each shared prefix key, count how many workers have a copy
+            key_to_workers: dict[str, set[int]] = defaultdict(set)
+            key_to_size: dict[str, int] = {}
+            for node in self.nodes:
+                for key, obj in node.l1_store.objects.items():
+                    if key.startswith("sp-"):
+                        key_to_workers[key].add(node.worker_id)
+                        key_to_size[key] = obj.size_bytes
+                for key, obj in node.l2_store.objects.items():
+                    if key.startswith("sp-"):
+                        key_to_workers[key].add(node.worker_id)
+                        key_to_size[key] = obj.size_bytes
+            if not self._l3a_shared:
+                for node in self.nodes:
+                    if node.l3a_store:
+                        for key, obj in node.l3a_store.objects.items():
+                            if key.startswith("sp-"):
+                                key_to_workers[key].add(node.worker_id)
+                                key_to_size[key] = obj.size_bytes
+
+            # Compute duplication
+            total_dup_bytes = 0
+            max_repl = 0
+            for key, workers in key_to_workers.items():
+                n_copies = len(workers)
+                if n_copies > 1:
+                    total_dup_bytes += (n_copies - 1) * key_to_size.get(key, 0)
+                max_repl = max(max_repl, n_copies)
+                self.metrics.shared_prefix_worker_distribution[key] = n_copies
+
+            self.metrics.duplicate_block_bytes.append(total_dup_bytes)
+            self.metrics.max_replication_factor.append(max_repl)
+
+        # Record L3A concurrent reads
+        self.metrics.l3a_concurrent_reads.append(self._concurrent_l3a_reads)
 
         # Record per-node and aggregate tier occupancy
         # L1 is per-GPU, L2 is per-worker (shared by GPUs on same host)
@@ -1181,6 +1260,80 @@ class SimEngine:
             return Tier.L3A
 
         return None
+
+    def _place_shared_tiers(
+        self, session_id: str, profile, node_id: int, collecting: bool,
+    ) -> None:
+        """Place multi-tier shared prefix blocks with ref counting."""
+        sharing_cfg = self.config.cache.sharing
+        cumulative_tokens = 0
+        groups_for_session = []
+
+        for tier in sharing_cfg.tiers:
+            if tier.tokens <= 0:
+                continue
+
+            # Compute sharing group key
+            if tier.sharing_group_size <= 1:
+                # Session-unique — no sharing
+                continue
+
+            # Derive group ID from session
+            sess = self.sessions.get(session_id)
+            if not sess:
+                continue
+            session_num = int(session_id[1:]) if session_id.startswith("s") else 0
+            group_id = session_num % tier.sharing_group_size
+            group_key = f"{tier.name}:{profile.name}:{group_id}"
+            groups_for_session.append(group_key)
+
+            sp_key = f"sp-{group_key}"
+            existing = self._find_cache_object(sp_key)
+
+            if existing:
+                existing.ref_count += 1
+                existing.last_accessed_at_us = self.sim_clock_us
+                if collecting:
+                    self.metrics.shared_block_memory_saved_bytes += existing.size_bytes
+                    self.metrics.shared_block_ref_count_max = max(
+                        self.metrics.shared_block_ref_count_max, existing.ref_count
+                    )
+            else:
+                sp_size = kv_size_bytes(tier.tokens, self.config.model)
+                self._place_kv_object(
+                    sp_key, "__shared__", profile,
+                    sp_size, tier.tokens, collecting,
+                    shared_prefix_id=f"{tier.name}-{profile.name}",
+                    node_id=node_id,
+                )
+                if self._find_cache_object(sp_key):
+                    self._shared_block_index[group_key] = sp_key
+                    if collecting:
+                        self.metrics.shared_block_groups += 1
+
+            cumulative_tokens += tier.tokens
+
+        # Also insert into shared prefix trie for cache lookup
+        total_shared = sum(t.tokens for t in sharing_cfg.tiers if t.tokens > 0)
+        if total_shared > 0:
+            # Use the outermost (framework) tier's key for prefix trie
+            first_tier = sharing_cfg.tiers[0]
+            session_num = int(session_id[1:]) if session_id.startswith("s") else 0
+            group_id = session_num % first_tier.sharing_group_size
+            framework_key = f"sp-{first_tier.name}:{profile.name}:{group_id}"
+            if self._find_cache_object(framework_key):
+                self.shared_prefix_trie.insert(
+                    total_shared, framework_key, self.sim_clock_us,
+                )
+
+        # Track session's sharing groups for cleanup
+        if groups_for_session:
+            existing_groups = self._session_sharing_groups.get(session_id, [])
+            # Merge without duplicates
+            for g in groups_for_session:
+                if g not in existing_groups:
+                    existing_groups.append(g)
+            self._session_sharing_groups[session_id] = existing_groups
 
     def _transition(self, request_id: str, next_state: RequestState) -> None:
         current = self.request_states.get(request_id)

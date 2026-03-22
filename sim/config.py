@@ -58,9 +58,27 @@ class ServiceConfig:
 
 
 @dataclass
+class SharingTier:
+    name: str                    # "framework", "workspace", "session"
+    tokens: int                  # tokens in this tier
+    sharing_group_size: int      # users sharing this tier (1 = unique per session)
+
+
+@dataclass
+class SharingConfig:
+    enabled: bool = False
+    tiers: list[SharingTier] = field(default_factory=list)
+    # Example tiers:
+    # [SharingTier("framework", 56000, 1000),   # 56K shared by 1000 users
+    #  SharingTier("workspace", 15000, 10),      # 15K shared by 10 users per team
+    #  SharingTier("session", 0, 1)]             # remainder unique
+
+
+@dataclass
 class CacheConfig:
     block_size_tokens: int = 0  # 0=legacy (whole object), 16=vLLM, 256=OpenAI, 4096=page-aligned
     block_alignment: str = "fixed"  # "fixed" (uniform blocks) or "message" (Anthropic-style breakpoints)
+    sharing: SharingConfig = field(default_factory=SharingConfig)
 
 
 @dataclass
@@ -94,7 +112,13 @@ class SimConfig:
         raw["profiles"] = [WorkloadProfile(**p) for p in raw["profiles"]]
         raw["service"] = ServiceConfig(**raw["service"])
         if "cache" in raw:
-            raw["cache"] = CacheConfig(**raw["cache"])
+            cache_raw = raw["cache"]
+            if "sharing" in cache_raw:
+                sharing_raw = cache_raw["sharing"]
+                if "tiers" in sharing_raw:
+                    sharing_raw["tiers"] = [SharingTier(**t) for t in sharing_raw["tiers"]]
+                cache_raw["sharing"] = SharingConfig(**sharing_raw)
+            raw["cache"] = CacheConfig(**cache_raw)
         return cls(**raw)
 
     def to_json(self, path: str) -> None:

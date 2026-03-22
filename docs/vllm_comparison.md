@@ -139,9 +139,9 @@ vLLM can **preempt** running requests — evict their KV cache and reschedule th
 
 | Aspect | Gap | Impact |
 |--------|-----|--------|
-| **Block vs object granularity** | vLLM uses 16-token blocks; we use whole-context objects | We can't model partial prefix sharing or block-level eviction |
-| **Hash vs trie matching** | vLLM's hash is exact; our trie uses token count proxy | We may over-count hits for different prompts of same length |
-| **Cross-session block sharing** | vLLM shares physical blocks implicitly; we create separate objects | We overestimate memory usage for shared-prompt workloads |
+| **Block vs object granularity** | vLLM uses 16-token blocks; we use configurable block sizes | ✅ Phase 1: configurable block_size_tokens (16/256/4096). Boundary rounding modeled. |
+| **Hash vs trie matching** | vLLM's hash is exact; our trie uses token count proxy | Partial gap — exact hash matching not yet implemented, but block boundary rounding captures the economic effect |
+| **Cross-session block sharing** | vLLM shares physical blocks implicitly; we use ref-counted sharing tiers | ✅ Phase 2: three-tier sharing (framework/workspace/session) with ref counting, duplication tracking, bandwidth contention |
 | **Preemption** | vLLM preempts running requests; we don't | We can't model priority-based scheduling dynamics |
 | **Batched prefill** | vLLM batches prefill with decode; we model single-sequence | Our prefill latencies are conservative (slower than reality) |
 | **Global L3A / distributed cache** | We model it; vLLM doesn't have it yet | Our model is forward-looking (llm-d direction) |

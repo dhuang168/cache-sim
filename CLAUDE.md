@@ -80,6 +80,13 @@ These are **mandatory** — must all pass before any exploratory run. They test 
 7. `test_ttl_migrations_separate_from_pressure` — eviction counters are independent
 8. `test_no_global_l3a_penalty_single_worker` — no remote penalty with 1 worker
 
+### Block Sharing Tests (`tests/test_sharing.py`)
+10 tests for cross-session prefix sharing:
+- Sharing config defaults, tier stacking, ref count increment
+- Memory saved metric, shared block groups, different profiles don't share
+- Backward compatibility (sharing disabled), cross-worker duplication
+- L3A bandwidth contention tracking, sharing reduces occupancy
+
 ### Block Allocation Tests (`tests/test_blocks.py`)
 21 tests for token block math and cache hit granularity:
 - Block count at 16/256/4096 token sizes, exact fit, legacy mode

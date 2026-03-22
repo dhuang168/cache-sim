@@ -4,33 +4,24 @@ Date: 2026-03-22
 
 ## Phases
 
-### Phase 0: Test Hardening and Speed
-Enhance unit tests to cover all bugs found during development. Improve test speed so the full suite runs in <10s.
+### Phase 0: Test Hardening and Speed ✅ COMPLETE
+- 8 config consistency regression tests covering all 12 known bugs
+- 35 tests in 4.66s
 
-Goals:
-- Add tests for every bug in CLAUDE.md debug history that doesn't have a regression test
-- Add config consistency validation tests (oracle range covers workload, arrival rate vs throughput, etc.)
-- Optimize slow tests (reduce sim duration where possible)
-- Target: full suite <10s, all known bugs covered
+### Phase 1: Block-Level Allocation ✅ COMPLETE
+- Configurable `block_size_tokens`: 0=legacy, 16=vLLM, 256=OpenAI, 4096=page
+- Block boundary rounding: only full blocks count as cached
+- Finding: negligible impact on coding workloads (5% loss at 4K blocks vs 0.025% at 16-token)
+- Anthropic message-style deferred to future phase
+- 21 new tests, 56 total
 
-### Phase 1: Block-Level Allocation (High Priority)
-Replace whole-context `CacheObject` with block chains. Support configurable block sizes:
-- **vLLM style**: 16-token blocks (GPU-optimized, fine granularity)
-- **OpenAI style**: 256-token prefix blocks (coarser, API-level caching)
-- **Anthropic style**: message-boundary breakpoints (static cache at message boundaries)
-- **Non-GPU approach**: 4K page-aligned blocks (OS page size, for CPU/SSD tiers)
-
-This enables:
-- Partial prefix sharing (first N blocks match, rest diverge)
-- Block-level eviction (evict tail blocks, keep shared prefix)
-- More accurate fragmentation modeling
-
-### Phase 2: Cross-Session Block Sharing (High Priority)
-Replace per-session KV objects with shared physical blocks using reference counting.
-- Identical token blocks across sessions share one physical copy
-- Ref counting per block (not per object)
-- Implicit deduplication of system prompts
-- Memory savings proportional to shared prefix length × concurrent sessions
+### Phase 2: Cross-Session Block Sharing ✅ COMPLETE
+- Three-tier sharing model: framework (56K), workspace (15K), session (unique)
+- Token counts and group sizes fully configurable
+- Reference counting on shared objects
+- Cross-worker duplication tracking (probabilistic, not assumed)
+- Global L3A bandwidth contention model (concurrent reads share bandwidth)
+- 10 new tests, 66 total in 5.97s
 
 ### Phase 3: Reactive Eviction (Medium Priority)
 Replace TTL-driven tier migration with reactive LRU eviction.

@@ -80,6 +80,20 @@ class MetricsCollector:
     non_affinity_dispatches: int = 0
     cross_node_transfers: int = 0
 
+    # Block sharing metrics
+    shared_block_groups: int = 0
+    shared_block_memory_saved_bytes: int = 0
+    shared_block_ref_count_max: int = 0
+
+    # Cross-worker duplication metrics (sampled at epoch)
+    duplicate_block_bytes: list[int] = field(default_factory=list)  # redundant bytes across workers per epoch
+    max_replication_factor: list[int] = field(default_factory=list)  # most-replicated object per epoch
+    shared_prefix_worker_distribution: dict[str, int] = field(default_factory=dict)  # cache_key → n_workers having a copy
+
+    # Global L3A bandwidth contention
+    l3a_concurrent_reads: list[int] = field(default_factory=list)  # concurrent L3A reads per epoch
+    l3a_bandwidth_contention_events: int = 0  # times contention factor > 1
+
     # Total sim time for rate calculations
     effective_sim_us: int = 0
 
@@ -200,6 +214,18 @@ class MetricsCollector:
         if prefill_duration_ms:
             result["prefill_duration_ms"] = prefill_duration_ms
             result["mean_slot_utilization_pct"] = mean_slot_util
+
+        # Block sharing stats
+        if self.shared_block_memory_saved_bytes > 0:
+            result["sharing"] = {
+                "groups": self.shared_block_groups,
+                "memory_saved_gb": r(self.shared_block_memory_saved_bytes / 1e9),
+                "max_ref_count": self.shared_block_ref_count_max,
+            }
+            if self.duplicate_block_bytes:
+                result["sharing"]["duplicate_bytes_last_gb"] = r(self.duplicate_block_bytes[-1] / 1e9)
+            if self.max_replication_factor:
+                result["sharing"]["max_replication"] = max(self.max_replication_factor)
 
         if self.affinity_dispatches + self.non_affinity_dispatches > 0:
             result["dispatch_stats"] = dispatch_stats
