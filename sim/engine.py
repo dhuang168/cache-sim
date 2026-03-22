@@ -1088,20 +1088,23 @@ class SimEngine:
                     evicted = eviction.evict_l1_to_l2(to_free)
                     self.metrics.l1_to_l2_evictions += len(evicted)
 
-        # Run L2 -> L3A hibernation checks per worker (L2 is shared within worker)
-        checked_workers = set()
-        for node_id, node in enumerate(self.nodes):
-            if node.worker_id in checked_workers:
-                continue
-            checked_workers.add(node.worker_id)
-            eviction = self._node_eviction[node_id]
-            expired_l2 = eviction.find_ttl_expired_l2(self.sim_clock_us)
-            for key in expired_l2:
-                eviction.hibernate_l2_to_l3a(key)
-                self.metrics.l2_to_l3a_evictions += 1
+        # Run L2 -> L3A hibernation checks per worker (TTL mode only)
+        if self.config.cache.eviction_policy == "ttl":
+            checked_workers = set()
+            for node_id, node in enumerate(self.nodes):
+                if node.worker_id in checked_workers:
+                    continue
+                checked_workers.add(node.worker_id)
+                eviction = self._node_eviction[node_id]
+                expired_l2 = eviction.find_ttl_expired_l2(self.sim_clock_us)
+                for key in expired_l2:
+                    eviction.hibernate_l2_to_l3a(key)
+                    self.metrics.l2_to_l3a_evictions += 1
 
-        # L3a TTL checks
-        if self._l3a_shared:
+        # L3a TTL checks (TTL mode only)
+        if self.config.cache.eviction_policy != "ttl":
+            pass  # LRU mode: no TTL-driven L3A cleanup
+        elif self._l3a_shared:
             expired_l3a = self._node_eviction[0].find_ttl_expired_l3a(self.sim_clock_us)
             for key in expired_l3a:
                 obj = self._shared_l3a.get(key)
@@ -1189,15 +1192,16 @@ class SimEngine:
                 block_layout=TIER_TO_LAYOUT[Tier.L1],
             )
             l1.insert(cache_key, obj)
-            # Schedule TTL
-            ttl_us = int(self.config.ttl_l2_s * 1_000_000)
-            if ttl_us >= 0:
-                self.schedule(Event(
-                    time_us=self.sim_clock_us + ttl_us, seq=0,
-                    event_type=EventType.TTL_FIRE,
-                    session_id=session_id,
-                    payload={"cache_key": cache_key, "target": "l2_hibernate", "node_id": node_id},
-                ))
+            # Schedule TTL (only in TTL eviction mode)
+            if self.config.cache.eviction_policy == "ttl":
+                ttl_us = int(self.config.ttl_l2_s * 1_000_000)
+                if ttl_us >= 0:
+                    self.schedule(Event(
+                        time_us=self.sim_clock_us + ttl_us, seq=0,
+                        event_type=EventType.TTL_FIRE,
+                        session_id=session_id,
+                        payload={"cache_key": cache_key, "target": "l2_hibernate", "node_id": node_id},
+                    ))
             return Tier.L1
 
         # L1 too small — try node's L2
@@ -1225,15 +1229,16 @@ class SimEngine:
                 block_layout=TIER_TO_LAYOUT[Tier.L2],
             )
             l2.insert(cache_key, obj)
-            # Schedule L3a hibernation TTL
-            ttl_us = int(self.config.ttl_l3a_s * 1_000_000)
-            if ttl_us >= 0:
-                self.schedule(Event(
-                    time_us=self.sim_clock_us + ttl_us, seq=0,
-                    event_type=EventType.TTL_FIRE,
-                    session_id=session_id,
-                    payload={"cache_key": cache_key, "target": "l3a_hibernate", "node_id": node_id},
-                ))
+            # Schedule L3a hibernation TTL (only in TTL eviction mode)
+            if self.config.cache.eviction_policy == "ttl":
+                ttl_us = int(self.config.ttl_l3a_s * 1_000_000)
+                if ttl_us >= 0:
+                    self.schedule(Event(
+                        time_us=self.sim_clock_us + ttl_us, seq=0,
+                        event_type=EventType.TTL_FIRE,
+                        session_id=session_id,
+                        payload={"cache_key": cache_key, "target": "l3a_hibernate", "node_id": node_id},
+                    ))
             return Tier.L2
 
         # L2 too small — try L3A (shared or local)

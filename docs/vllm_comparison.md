@@ -145,7 +145,7 @@ vLLM can **preempt** running requests — evict their KV cache and reschedule th
 | **Preemption** | vLLM preempts running requests; we don't | We can't model priority-based scheduling dynamics |
 | **Batched prefill** | vLLM batches prefill with decode; we model single-sequence | Our prefill latencies are conservative (slower than reality) |
 | **Global L3A / distributed cache** | We model it; vLLM doesn't have it yet | Our model is forward-looking (llm-d direction) |
-| **TTL vs reactive eviction** | We use TTLs; vLLM is purely reactive (LRU on demand) | Our tier movement timing differs from production |
+| **TTL vs reactive eviction** | We support both: `eviction_policy="ttl"` or `"lru"` | ✅ Phase 3: LRU mode matches vLLM's reactive approach |
 
 ### Recommendations for Improving Alignment
 

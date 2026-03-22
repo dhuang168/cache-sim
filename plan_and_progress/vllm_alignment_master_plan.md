@@ -23,12 +23,12 @@ Date: 2026-03-22
 - Global L3A bandwidth contention model (concurrent reads share bandwidth)
 - 10 new tests, 66 total in 5.97s
 
-### Phase 3: Reactive Eviction (Medium Priority)
-Replace TTL-driven tier migration with reactive LRU eviction.
-- Evict only when space is needed (not proactively by timer)
-- LRU among ref_cnt==0 blocks
-- Blocks linger after request completes (future requests can reclaim)
-- Tie-break: preserve shared prefix roots
+### Phase 3: Reactive Eviction ✅ COMPLETE
+- `eviction_policy="lru"` config option (default "ttl" for backward compat)
+- LRU mode: no TTL_FIRE events, objects stay until pressure eviction
+- Objects linger after session ends — future sessions reclaim them
+- Combines with Phase 2 sharing: hot shared prefixes never evicted under LRU
+- 6 new tests, 72 total in 6.09s
 
 ### Phase 4: Preemption Model (Medium Priority)
 Allow scheduler to preempt running requests to free KV blocks.
