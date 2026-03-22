@@ -120,6 +120,37 @@ Hit rate is 99.9% regardless of TTL. Shorter L2 TTLs increase queue wait (object
 
 Scales linearly. Global and local identical — cache is never the bottleneck at realistic hardware scale. **QPS is limited by prefill compute (~14-17s for large coding contexts), not by cache capacity.**
 
+## Simulation Duration Sensitivity
+
+The 60s simulation has **not reached steady state**. Longer sims show increasing tier pressure as multi-turn coding sessions accumulate context:
+
+| Duration | L1 Sat. | L2 Sat. | L3A Sat. | Miss Rate | Events |
+|----------|---------|---------|----------|-----------|--------|
+| 60s | 91.8% | 75.5% | 9.9% | 0.08% | 6,054 |
+| 120s | 86.3% | 87.8% | 36.2% | 0.14% | 15,784 |
+
+At 120s, L2 saturation rises from 75% to 88%, L3A from 10% to 36%, and miss rate nearly doubles. This is because coding sessions (`iat_mean=360s`) get more turns in longer sims, growing their context and producing larger KV objects. A production deployment running for hours would see significantly more L2/L3A pressure and potentially higher miss rates — the global vs local L3A distinction would become more significant at scale.
+
+## Recompute Fraction Analysis
+
+The recompute fraction (mean=31%, p50=29%) may seem high given 98.2% cache hit rate. These metrics measure different things:
+
+- **Cache hit rate**: was a cached KV object found? (binary per request)
+- **Recompute fraction**: what fraction of total tokens must be recomputed? (per request)
+
+Even with a cache hit at 95% prefix stability, the recompute fraction is significant because **new input tokens are always uncached**:
+
+```
+Total context: ~30k tokens (stable prefix)
+Cached tokens: 30k × 0.95 = 28.5k
+Uncached from instability: 30k × 0.05 = 1.5k
+New input tokens (user message + tool output): 8-15k (always uncached)
+Total uncached: 9.5-16.5k
+Recompute fraction: 9.5k / 38k = 25% (coding) to 16.5k / 46.5k = 35% (agentic_coding)
+```
+
+This is realistic — in Claude Code, each turn adds 8-15k new tokens (tool output, user message) out of a 40-60k total prompt, so 20-35% is new each turn. The cache saves recomputation of the other 65-80%.
+
 ## When Does Global L3A Matter?
 
 The global L3A advantage appears under **constrained SSD capacity** — when per-worker SSD is too small to hold the active coding sessions' KV objects. In prior stressed-config analysis (50GB L3A/worker):
@@ -134,15 +165,19 @@ The gap grows with more workers because local L3A fragments capacity. At extreme
 
 ## Key Findings
 
-1. **Realistic hardware absorbs coding workloads well.** 80GB L1 + 1TB L2 + 8TB L3A per worker provides 99.9% hit rate. Cache capacity is not the bottleneck.
+1. **Realistic hardware absorbs coding workloads well.** 80GB L1 + 1TB L2 + 8TB L3A per worker provides 99.9% hit rate in a 60s sim. Cache capacity is not the bottleneck at this scale.
 
-2. **Prefill compute is the bottleneck.** 60k-token coding contexts require ~14-17s of GPU compute. This limits sustaining QPS to ~44/worker regardless of cache configuration.
+2. **Prefill compute is the bottleneck.** 60k-token coding contexts require ~14-17s of GPU compute. This limits sustaining QPS to ~39-44/worker regardless of cache configuration.
 
-3. **Global vs local L3A difference is negligible at realistic scale.** 8TB/worker SSD never overflows in normal operation. The advantage only appears with constrained SSD or extreme concurrent session counts.
+3. **60s sim has not reached steady state.** At 120s, L2 saturation rises to 88% and miss rate doubles. Production deployments running for hours would see significantly more tier pressure — global vs local L3A differences would become more significant.
 
-4. **L1 is the critical tier.** 98.2% of lookups hit L1 (HBM). L1 capacity directly determines cache effectiveness — below 10GB, coding KV objects can't fit and performance degrades sharply.
+4. **Global vs local L3A difference is negligible at realistic scale in short sims.** 8TB/worker SSD doesn't overflow in 60-120s. The advantage appears with constrained SSD, longer runtimes, or extreme concurrent session counts.
 
-5. **High prefix stability** (95% initial, 80-85% final) means most tokens are served from cache. The 20-30k shared system prefix is reused across all turns in a session.
+5. **L1 is the critical tier.** 98.2% of lookups hit L1 (HBM). L1 capacity directly determines cache effectiveness — below 10GB, coding KV objects can't fit and performance degrades sharply.
+
+6. **Recompute fraction (~31%) is driven by new input tokens, not prefix instability.** Even with 95% prefix stability, each coding turn adds 8-15k new tokens (user message + tool output), creating a 25-35% recompute fraction. This is consistent with real-world Claude Code usage.
+
+7. **High prefix stability** (95% initial, 80-85% final) means 65-80% of tokens per turn are served from cache. The 20-30k shared system prefix is reused across all turns in a session.
 
 ## Reproduction
 
