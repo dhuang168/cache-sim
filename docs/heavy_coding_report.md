@@ -36,24 +36,24 @@
 ## Single Worker Results (8 GPUs, realistic hardware)
 
 ```
-Sharing factor:  1.865
-Hit rates:       L1=98.2%  L2=1.7%  L3A=0.0%  miss=0.08%
-Tier saturation: L1=91.8%  L2=154.1%  L3A=0.0%
+Sharing factor:  1.866
+Hit rates:       L1=98.2%  L2=0.83%  L3A=0.88%  miss=0.08%
+Tier saturation: L1=91.8%  L2=75.5%  L3A=9.9%
 L1->L2 pressure:   7.4/s
 Cold evictions:    0
 ```
 
 Key observations:
 - **98.2% L1 hits** — 80GB L1 holds ~4-10 coding KV objects. Most lookups find cached KV in HBM.
-- **L2 acts as overflow** — only 1.7% of lookups fall through to L2 (DRAM).
-- **L3A unused** — with 80GB L1 + 1TB L2 per worker, objects rarely reach L3A in a 60s sim.
+- **L2 acts as overflow** at 75.5% saturation — 0.83% of lookups fall through to L2 (DRAM).
+- **L3A catches L2 overflow** — 0.88% of lookups hit L3A. Objects that can't fit in L2 are hibernated to SSD.
 - **0.08% cold miss** — near-perfect cache performance.
 - **L1 saturation 91.8%** — L1 is well-utilized but not overflowing excessively.
 
 ### Plot: Tier Occupancy Over Time
 ![Tier Occupancy](../plots/heavy_coding/tier_occupancy.png)
 
-L1 fills to ~92% and stays there. L2 absorbs overflow. L3A remains empty.
+L1 fills to ~92% and stays there. L2 absorbs overflow at ~75%. L3A catches objects that overflow L2 (~10%).
 
 ### Plot: TTFT Distribution
 ![TTFT Distribution](../plots/heavy_coding/ttft_distribution.png)

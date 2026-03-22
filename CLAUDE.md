@@ -113,6 +113,11 @@ These are **mandatory** — must all pass before any exploratory run. They test 
 **Root cause**: `l1_to_l2_evictions` counted both TTL-driven tier demotions (time-based, constant rate) and occupancy-driven pressure evictions (capacity-dependent). The TTL-driven moves dominated, masking the capacity relationship.
 **Fix**: Split into two metrics: `l1_to_l2_evictions` (pressure-driven only) and `l1_to_l2_ttl_migrations` (TTL-driven). The L1 sensitivity plot now shows both separately. The plateau behavior is correct — once L1 can accept objects, the throughput rate equals the arrival rate regardless of capacity.
 
+### Bug: L2 saturation exceeded 100% (eviction bypassed capacity check)
+**Symptom**: L2 tier occupancy reported as 154% — `used_bytes > capacity_bytes`.
+**Root cause**: `EvictionEngine.evict_l1_to_l2()` inserted objects into L2 without checking `can_fit()`. When L1 pressure eviction fired and L2 was already full, objects were inserted unconditionally, exceeding capacity.
+**Fix**: Added `can_fit()` check before L2 insert in `evict_l1_to_l2()`. When L2 is full, objects are hibernated directly to L3A via new `hibernate_l2_to_l3a_obj()` method.
+
 ### Bug: Short sims only generated batch traffic (diurnal rate = 0 at midnight)
 **Symptom**: With v2 workload profiles, only `batch` produced KV objects. Chat, coding, agent, agentic_coding generated zero sessions.
 **Root cause**: The NHPP diurnal rate model peaks at 9 AM (offset 32400s). At t=0 (midnight), all profiles with `diurnal_peak_trough_ratio=4.0` have rate=0. The first arrival for non-batch profiles was at ~22,400s (~6.2 hours) — well beyond the 60s sim duration. Batch survived because its ratio=1.5 (nearly flat).

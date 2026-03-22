@@ -66,10 +66,34 @@ class EvictionEngine:
             obj.tier = Tier.L2
             obj.block_count = new_blocks
             obj.block_layout = TIER_TO_LAYOUT[Tier.L2]
-            l2.insert(key, obj)
+
+            if l2.can_fit(obj.size_bytes):
+                l2.insert(key, obj)
+            else:
+                # L2 full — hibernate directly to L3A
+                self.hibernate_l2_to_l3a_obj(key, obj)
             evicted.append(key)
 
         return evicted
+
+    def hibernate_l2_to_l3a_obj(self, cache_key: str, obj) -> bool:
+        """Move an already-removed object directly to L3A. Used when L2 is full."""
+        l3a = self.stores[Tier.L3A]
+        from sim.cache import allocated_blocks, TIER_TO_LAYOUT
+        new_blocks = allocated_blocks(obj.size_bytes, l3a.block_size_bytes)
+        obj.tier = Tier.L3A
+        obj.block_count = new_blocks
+        obj.block_layout = TIER_TO_LAYOUT[Tier.L3A]
+        obj.is_hibernated = True
+
+        if l3a.can_fit(obj.size_bytes):
+            l3a.insert(cache_key, obj)
+            return True
+        cleaned = self.cleanup_l3a(new_blocks * l3a.block_size_bytes)
+        if l3a.can_fit(obj.size_bytes):
+            l3a.insert(cache_key, obj)
+            return True
+        return False  # object lost
 
     def hibernate_l2_to_l3a(self, cache_key: str) -> bool:
         """Move CacheObject from L2 to L3a storage. Returns True if successful."""
