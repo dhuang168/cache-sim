@@ -1,6 +1,8 @@
 # Simulation Development Guide
 
-A methodology for building, validating, and analyzing discrete-event simulators. Distilled from building the PCS multi-node cache simulator.
+A methodology for building, validating, and analyzing simulation systems. Applicable to discrete-event simulators, system modeling, and performance analysis projects.
+
+Distilled from building a multi-node KV cache simulator. Examples reference that project but the principles are general — substitute your own domain (network sim, database workload, hardware model, etc.).
 
 ## 1. Research Before Building
 

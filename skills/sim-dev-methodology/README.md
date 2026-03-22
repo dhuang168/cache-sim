@@ -32,9 +32,12 @@ cat skills/sim-dev-methodology/memory/MEMORY_ENTRIES.md >> ~/.claude/projects/<y
 
 ## What's Included
 
-| File | Purpose |
-|------|---------|
-| `CLAUDE_SNIPPET.md` | Drop-in CLAUDE.md rules (compact, always loaded) |
-| `methodology_full.md` | Complete guide with examples (reference doc) |
-| `memory/*.md` | Individual memory files for auto-loading |
-| `memory/MEMORY_ENTRIES.md` | Index entries to add to MEMORY.md |
+Three layers, from lightest to most comprehensive:
+
+| Layer | File(s) | When Loaded | Purpose |
+|-------|---------|------------|---------|
+| **Rules** | `CLAUDE_SNIPPET.md` | Every prompt (via CLAUDE.md) | Compact rules: workflow, core practices, checklists (~60 lines) |
+| **Memory** | `memory/*.md` (6 files) | Every conversation (auto-loaded) | Individual skill areas with "why" and "how to apply" |
+| **Reference** | `methodology_full.md` | On demand (read when needed) | Complete 8-section guide with concrete examples from a real project |
+
+Use all three for maximum effect, or just the CLAUDE_SNIPPET for lightweight adoption.
