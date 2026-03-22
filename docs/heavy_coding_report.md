@@ -57,6 +57,8 @@ Both global and local L3A reach 100% occupancy quickly. The difference: with loc
 
 At 1 worker: identical (no cross-worker migration). At 2+ workers: local L3A collapses because sessions migrate and can't find KV on the new worker.
 
+**Note on queue wait p95**: The node scaling plot shows queue wait ~80s for global and ~70s for local. This is **not** meaningful — the system is so overloaded (arrival 693/s vs throughput 78/s) that **88.7% of requests are dropped** before entering the queue. Both queues are permanently full (~4000 depth). The 10s difference is noise on equally-saturated queues. Queue wait is only meaningful when the system is not in severe overload.
+
 ### TTL Sensitivity (4 workers, 20 min)
 ![TTL Sensitivity 20min](../plots/heavy_coding/ttl_sensitivity_20min.png)
 
@@ -153,8 +155,9 @@ Each migrated request with local L3A is a **cold miss** (14-17s full recompute) 
 |---------|----------|
 | **Global L3A is essential** for multi-worker deployments | 99.8% vs 26.6% hit rate at 20 min (73pt gap) |
 | **Session migration is the mechanism** | 97% non-affinity dispatch at steady state |
-| **Infrastructure metrics don't show the gap** | Queue depth, slot utilization, occupancy are identical for global and local — the difference is in useful work per slot |
-| **Prefill compute is the throughput bottleneck** | Mean 7.5s/request, limited by 14-17s coding prefills → ~39 QPS/worker |
+| **Infrastructure metrics don't show the gap** | Queue depth, slot utilization, occupancy identical. Both drop 88.7% of requests. The gap is in useful work per completed request. |
+| **System is severely overloaded** | Arrival 693/s vs throughput 78/s. 88.7% of requests dropped. Queue wait p95 (~70-80s) is noise on permanently-full queues. |
+| **Prefill compute is the throughput bottleneck** | Mean 7.5s/request, 1024 slots → max ~137/s theoretical, actual 78/s |
 | **L1 is critical but temporary** | 98% L1 hits at 1 min, saturates by 5 min |
 | **50ms global L3A latency is negligible** | <0.3% overhead on 7.5s mean prefill |
 | **TTL has no impact** on global vs local | Both modes insensitive to L2 TTL (10-300s) |
