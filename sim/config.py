@@ -78,7 +78,7 @@ class SharingConfig:
 class CacheConfig:
     block_size_tokens: int = 0  # 0=legacy (whole object), 16=vLLM, 256=OpenAI, 4096=page-aligned
     block_alignment: str = "fixed"  # "fixed" (uniform blocks) or "message" (Anthropic-style breakpoints)
-    eviction_policy: str = "ttl"  # "ttl" (timer-driven demotion) or "lru" (reactive, evict only on pressure)
+    eviction_policy: str = "ttl"  # "ttl" (timer with access-based refresh) or "lru" (reactive, evict only on pressure)
     sharing: SharingConfig = field(default_factory=SharingConfig)
 
 
