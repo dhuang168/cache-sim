@@ -113,6 +113,12 @@ These are **mandatory** — must all pass before any exploratory run. They test 
 **Root cause**: `l1_to_l2_evictions` counted both TTL-driven tier demotions (time-based, constant rate) and occupancy-driven pressure evictions (capacity-dependent). The TTL-driven moves dominated, masking the capacity relationship.
 **Fix**: Split into two metrics: `l1_to_l2_evictions` (pressure-driven only) and `l1_to_l2_ttl_migrations` (TTL-driven). The L1 sensitivity plot now shows both separately. The plateau behavior is correct — once L1 can accept objects, the throughput rate equals the arrival rate regardless of capacity.
 
+### Bug: Local L3A searched all workers' SSDs (should only search own worker)
+**Symptom**: Global and local L3A showed identical hit rates even at 20 min — but sessions were migrating (97% non-affinity dispatch).
+**Root cause**: `_find_cache_object_with_node()` in local L3A mode searched ALL workers' L3A stores, effectively giving local mode the same cross-worker visibility as global mode.
+**Fix**: In local mode, only search the requesting node's worker L3A via `from_node_id` parameter. Fallback to all-worker search only for global lookups (trie).
+**Impact**: At 20 min heavy coding, local L3A drops from 99.8% to 26.6% hit rate — revealing the true value of global L3A for session migration.
+
 ### Bug: L2 saturation exceeded 100% (eviction bypassed capacity check)
 **Symptom**: L2 tier occupancy reported as 154% — `used_bytes > capacity_bytes`.
 **Root cause**: `EvictionEngine.evict_l1_to_l2()` inserted objects into L2 without checking `can_fit()`. When L1 pressure eviction fired and L2 was already full, objects were inserted unconditionally, exceeding capacity.

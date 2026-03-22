@@ -335,10 +335,11 @@ class SimEngine:
     def _get_node_eviction(self, node_id: int) -> EvictionEngine:
         return self._node_eviction[node_id]
 
-    def _find_cache_object_with_node(self, key: str) -> tuple[CacheObject | None, int | None]:
+    def _find_cache_object_with_node(self, key: str, from_node_id: int | None = None) -> tuple[CacheObject | None, int | None]:
         """Search all node L1s, all node L2s, then L3A.
         Returns (obj, node_id) for L1/L2 hits; (obj, None) for shared L3A;
-        (obj, node_id) for local L3A hits."""
+        (obj, node_id) for local L3A hits.
+        For local L3A, only searches the requesting node's worker SSD."""
         for node in self.nodes:
             obj = node.l1_store.get(key)
             if obj:
@@ -351,11 +352,26 @@ class SimEngine:
             if obj:
                 return obj, None
         else:
-            # Local L3A: search each node's L3A
-            for node in self.nodes:
-                obj = node.l3a_store.get(key)
-                if obj:
-                    return obj, node.node_id
+            # Local L3A: only search the requesting node's worker SSD
+            if from_node_id is not None:
+                worker_id = self.nodes[from_node_id].worker_id
+                # All nodes on same worker share the same l3a_store reference
+                l3a = self.nodes[from_node_id].l3a_store
+                if l3a:
+                    obj = l3a.get(key)
+                    if obj:
+                        return obj, from_node_id
+            else:
+                # Fallback: search all workers' L3A (for global lookups like trie)
+                checked_workers = set()
+                for node in self.nodes:
+                    if node.worker_id in checked_workers:
+                        continue
+                    checked_workers.add(node.worker_id)
+                    if node.l3a_store:
+                        obj = node.l3a_store.get(key)
+                        if obj:
+                            return obj, node.node_id
         return None, None
 
     def _find_cache_object(self, key: str) -> CacheObject | None:
@@ -423,6 +439,8 @@ class SimEngine:
             payload["node_id"] = node.node_id
 
         # Cache lookup — pick the deepest match across both tries
+        # For local L3A, only search the assigned node's worker SSD
+        lookup_node_id = payload.get("node_id", None)  # set by push dispatch, None for pull
         hit_tier = None
         hit_key = None
         hit_node_id = None
@@ -431,7 +449,7 @@ class SimEngine:
             # Check shared prefix trie
             sp_key, sp_depth = self.shared_prefix_trie.lookup(sess.token_hash_count)
             if sp_key and sp_depth > 0:
-                sp_obj, sp_nid = self._find_cache_object_with_node(sp_key)
+                sp_obj, sp_nid = self._find_cache_object_with_node(sp_key, from_node_id=lookup_node_id)
                 if sp_obj:
                     best_depth = sp_depth
                     hit_key = sp_key
@@ -443,7 +461,7 @@ class SimEngine:
             if s_trie:
                 s_key, s_depth = s_trie.lookup(sess.token_hash_count)
                 if s_key and s_depth > best_depth:
-                    s_obj, s_nid = self._find_cache_object_with_node(s_key)
+                    s_obj, s_nid = self._find_cache_object_with_node(s_key, from_node_id=lookup_node_id)
                     if s_obj:
                         hit_key = s_key
                         hit_tier = s_obj.tier

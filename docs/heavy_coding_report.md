@@ -201,21 +201,34 @@ Longer sims confirm the tiers saturate over time (4 workers × 8 GPUs, realistic
 
 L2 saturates at 5 min, L3A is saturated from the start (objects skip L2 when it's full). By 20 min, 20k cold evictions occur — L3A is churning objects at 93× its capacity.
 
-However, **global vs local L3A remain identical** even at 20 min (both 99.77% hit rate). Per-worker analysis shows each worker places ~740 TB through its 8 TB L3A independently. Sessions are dispatched with affinity — once assigned to a worker, all their objects stay on that worker. Global pooling provides no cross-worker benefit because **no session's objects are accessed from a different worker**.
+At longer durations, **global L3A dramatically outperforms local** due to session migration:
 
-### When Would Global L3A Help?
+| Duration | Global Hit | Local Hit | Gap | Local Misses |
+|----------|-----------|----------|-----|-------------|
+| 1 min | 99.91% | 99.91% | 0% | 5 |
+| 5 min | 99.81% | **55.23%** | **+44.6%** | 30,078 |
+| 10 min | 99.73% | **36.74%** | **+63.0%** | 146,820 |
+| 20 min | 99.77% | **26.56%** | **+73.2%** | 606,005 |
 
-Global L3A would outperform local in scenarios with **cross-worker access patterns**:
-- **Session migration**: if a session's later requests land on a different worker (e.g., worker 0 is busy → request routed to worker 1 → needs KV from worker 0's L3A)
-- **Shared prefix deduplication**: many sessions share the same 20-30k system prompt KV. One copy in global L3A could serve all workers instead of each worker storing its own copy.
-- **Load imbalance**: if some workers handle more coding sessions than others, global L3A lets underloaded workers' SSD capacity absorb overflow from overloaded workers.
+### Why the Gap Appears
+
+**97% of dispatches are non-affinity** — sessions constantly migrate between workers. The push dispatcher's affinity check only looks at L1/L2. Once objects move to L3A (which happens as L1/L2 fill), the session loses affinity and gets dispatched to any available node.
+
+With **global L3A**: the migrated session finds its KV in the shared pool → cache hit.
+With **local L3A**: the new worker's SSD doesn't have the KV → cold miss → full 14-17s recompute.
+
+At 20 min, 97% non-affinity dispatch × local L3A = 606k cold misses (26.6% hit rate). Global L3A maintains 99.8% because the pooled storage is accessible from any worker.
+
+### Why 1-Min Sim Shows No Difference
+
+At 1 min, L1 (80 GB per GPU) and L2 (1 TB per worker) haven't filled yet. Objects stay in L1/L2, affinity checks find them, and sessions don't migrate. The effect requires enough time for objects to be evicted from L1/L2 to L3A, after which affinity is lost.
 
 ### Implications for Production
 
-- **Standard servers (2-8 TB NVMe)**: Local SSD is sufficient. With affinity dispatch, sessions stay on their assigned worker.
-- **Session migration scenarios**: Global L3A becomes valuable when requests can land on different workers.
-- **Shared prefix optimization**: Deduplicating system prompt KV across workers is a v2 optimization that would benefit from global L3A.
-- **Longer runtimes** (hours): L3A churn increases but the global/local difference depends on cross-worker access, not capacity.
+- **Global L3A is essential for multi-worker deployments.** With realistic coding workloads, sessions migrate between workers within minutes. Local L3A drops to 27% hit rate at 20 min.
+- **The bottleneck is affinity, not capacity.** Both global (32 TB) and local (8 TB/worker) have enough SSD. The difference is accessibility — global lets any worker find any session's KV.
+- **Affinity dispatch helps but doesn't solve it.** Affinity only checks L1/L2. Once objects reach L3A, affinity is lost. Extending affinity to include L3A would improve local mode but add cross-worker lookup overhead.
+- **Short sims (1 min) are misleading.** The gap only appears after L1/L2 fill and objects migrate to L3A (5+ min).
 
 ## Key Findings
 
@@ -225,9 +238,9 @@ Global L3A would outperform local in scenarios with **cross-worker access patter
 
 3. **60s sim has not reached steady state.** At 120s, L2 saturation rises to 88% and miss rate doubles. Production deployments running for hours would see significantly more tier pressure — global vs local L3A differences would become more significant.
 
-4. **Global vs local L3A difference is negligible even at 20-min sims.** Not because of capacity — both L2 and L3A are fully saturated — but because affinity dispatch keeps each session's objects on its assigned worker. Global pooling only helps with cross-worker access patterns (session migration, shared prefix dedup, load imbalance).
+4. **Global L3A is critical for multi-worker deployments.** At 20 min, global=99.8% vs local=26.6% hit rate. Sessions migrate between workers (97% non-affinity dispatch after L1/L2 evict to L3A), and local L3A can't serve migrated sessions. Global L3A pools all workers' SSDs.
 
-5. **L1 is the critical tier.** 98.2% of lookups hit L1 (HBM). L1 capacity directly determines cache effectiveness — below 10GB, coding KV objects can't fit and performance degrades sharply.
+5. **L1 is the critical tier in short sims.** 98.2% of lookups hit L1 (HBM) at 1 min. But L1 saturates quickly, and at 5+ min the working set overflows to L2/L3A where the global vs local distinction matters.
 
 6. **Recompute fraction (~31%) is driven by new input tokens, not prefix instability.** Even with 95% prefix stability, each coding turn adds 8-15k new tokens (user message + tool output), creating a 25-35% recompute fraction. This is consistent with real-world Claude Code usage.
 
