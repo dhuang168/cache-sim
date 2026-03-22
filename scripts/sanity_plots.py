@@ -25,7 +25,8 @@ from sim.config import SimConfig
 from sim.engine import SimEngine
 from sim.analysis import find_sustaining_qps
 
-CONFIG_PATH = str(Path(__file__).resolve().parent.parent / "configs" / "default.json")
+_DEFAULT_CONFIG = str(Path(__file__).resolve().parent.parent / "configs" / "default.json")
+CONFIG_PATH = _DEFAULT_CONFIG
 OUT_DIR = Path(__file__).resolve().parent.parent / "plots"
 OUT_DIR.mkdir(exist_ok=True)
 
@@ -603,4 +604,13 @@ def main():
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default=_DEFAULT_CONFIG, help="Config JSON path")
+    parser.add_argument("--outdir", default=None, help="Output directory for plots")
+    args = parser.parse_args()
+    CONFIG_PATH = args.config
+    if args.outdir:
+        OUT_DIR = Path(args.outdir)
+        OUT_DIR.mkdir(exist_ok=True, parents=True)
     main()
