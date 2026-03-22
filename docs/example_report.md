@@ -4,7 +4,7 @@ Results from running the full test suite and sanity-check plots against the simu
 
 ## Test Suite Results
 
-**22/22 tests passed** (pytest, Python 3.11, ~2 min total)
+**27/27 tests passed** (pytest, Python 3.11, ~4s total)
 
 ### Unit Tests
 
@@ -43,7 +43,12 @@ These tests exercise extreme configurations to verify the simulator respects phy
 | `test_queue_wait_metric` | PASS | Queue wait metric is populated and non-negative |
 | `test_local_l3a_mode` | PASS | Local L3A mode produces valid metrics |
 | `test_global_vs_local_l3a_hit_rate` | PASS | Global L3A miss rate ≤ local L3A miss rate |
-| `test_multinode_perf_benchmark` | PASS | 10s sim with 4 nodes completes in ~3.5s |
+| `test_worker_topology_shared_l2` | PASS | 8 GPUs / 2 workers: verifies L2 sharing and worker_id |
+| `test_intra_worker_no_l2_penalty` | PASS | Same-worker L2 access has no cross-node penalty |
+| `test_local_l3a_worker_isolation` | PASS | Object on worker 0 NOT visible from worker 1 (local L3A) |
+| `test_global_l3a_cross_worker_access` | PASS | Global L3A visible from any node |
+| `test_session_migration_global_advantage` | PASS | Tiny L1/L2 + 2 workers → global > local hit rate |
+| `test_multinode_perf_benchmark` | PASS | 10s sim with 4 nodes completes quickly |
 
 ## Glossary: Savings Classes
 

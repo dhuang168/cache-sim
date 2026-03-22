@@ -70,7 +70,7 @@ These are **mandatory** — must all pass before any exploratory run. They test 
 - `test_oracle.py` — Prefill/decode oracle correctness, transfer time calculation
 
 ### Multi-Node Tests (`tests/test_multinode.py`)
-9 tests covering multi-node dispatch:
+14 tests covering multi-node dispatch, worker topology, and L3A isolation:
 1. `test_single_node_backward_compat` — N=1 produces valid metrics, no dispatch tracking
 2. `test_more_nodes_reduce_queue_pressure` — 4 nodes → lower per-node queue pressure than 1 node
 3. `test_push_affinity_dispatches` — 4 nodes → affinity_dispatches > 0
@@ -80,6 +80,11 @@ These are **mandatory** — must all pass before any exploratory run. They test 
 7. `test_local_l3a_mode` — Local L3A mode runs and produces valid metrics
 8. `test_global_vs_local_l3a_hit_rate` — Global L3A miss rate ≤ local L3A miss rate
 9. `test_multinode_perf_benchmark` — 10s sim with 4 nodes completes in < 5s
+10. `test_worker_topology_shared_l2` — 8 GPUs / 2 workers verify L2 sharing and worker_id
+11. `test_intra_worker_no_l2_penalty` — same_worker() returns True/False correctly
+12. `test_local_l3a_worker_isolation` — object on worker 0 NOT visible from worker 1
+13. `test_global_l3a_cross_worker_access` — global L3A visible from any node
+14. `test_session_migration_global_advantage` — tiny L1/L2 + 2 workers → global > local hit rate
 
 ## Debug History and Lessons Learned
 
@@ -112,6 +117,11 @@ These are **mandatory** — must all pass before any exploratory run. They test 
 **Symptom**: L1 sensitivity plot showed eviction rate *increasing* with L1 capacity and then plateauing, which seemed counter-intuitive.
 **Root cause**: `l1_to_l2_evictions` counted both TTL-driven tier demotions (time-based, constant rate) and occupancy-driven pressure evictions (capacity-dependent). The TTL-driven moves dominated, masking the capacity relationship.
 **Fix**: Split into two metrics: `l1_to_l2_evictions` (pressure-driven only) and `l1_to_l2_ttl_migrations` (TTL-driven). The L1 sensitivity plot now shows both separately. The plateau behavior is correct — once L1 can accept objects, the throughput rate equals the arrival rate regardless of capacity.
+
+### Bug: Oracle table clamped at 32k tokens — inverted cache hit economics
+**Symptom**: Global L3A cache hits appeared SLOWER than cold misses. Controlled load tests showed local L3A with BETTER TTFT despite 73% cold miss rate.
+**Root cause**: Prefill oracle table only covered 512-32,768 tokens. `np.interp` clamped anything above 32k to 17s. With v2 coding workloads (50-100k tokens), cold misses cost 17s (clamped) while L3A cache hits cost transfer_time (2-4s) + partial recompute (5-10s) = 7-14s. But for agentic_coding at 65k+ tokens, transfer + partial exceeded the clamped 17s.
+**Fix**: Extended oracle table to 262,144 tokens with O(n²) attention scaling extrapolation: 65k=55s, 131k=180s, 262k=600s. Now cold miss on 95k tokens = 111s, cache hit = 13s (88% savings).
 
 ### Bug: Local L3A searched all workers' SSDs (should only search own worker)
 **Symptom**: Global and local L3A showed identical hit rates even at 20 min — but sessions were migrating (97% non-affinity dispatch).
