@@ -192,6 +192,86 @@ def test_intra_worker_no_l2_penalty():
     assert engine._same_worker(0, 4) is False
 
 
+def test_local_l3a_worker_isolation():
+    """Local L3A on worker 0 must NOT be visible from worker 1.
+    Place an object on worker 0's L3A, then search from worker 1 — should miss."""
+    config = _stressed_multinode_config(8, "push", gpus_per_worker=4)
+    config.service.l3a_shared = False
+    engine = SimEngine(config)
+
+    # Manually place an object in worker 0's L3A
+    from sim.cache import CacheObject, Tier, BlockLayout
+    obj = CacheObject(
+        session_id="test", shared_prefix_id=None, token_range=(0, 99),
+        model_id="test", tier=Tier.L3A, size_bytes=1024, block_count=1,
+        created_at_us=0, last_accessed_at_us=0, ref_count=1,
+        block_layout=BlockLayout.L3A_ALIGNED, is_hibernated=True,
+    )
+    engine.nodes[0].l3a_store.insert("test-key", obj)
+
+    # Search from worker 0's node — should find it
+    found, nid = engine._find_cache_object_with_node("test-key", from_node_id=0)
+    assert found is not None, "Should find object on own worker's L3A"
+
+    # Search from worker 1's node (node_id=4) — should NOT find it
+    found, nid = engine._find_cache_object_with_node("test-key", from_node_id=4)
+    assert found is None, "Should NOT find object on different worker's local L3A"
+
+
+def test_global_l3a_cross_worker_access():
+    """Global L3A must be accessible from any worker."""
+    config = _stressed_multinode_config(8, "push", gpus_per_worker=4)
+    config.service.l3a_shared = True
+    engine = SimEngine(config)
+
+    from sim.cache import CacheObject, Tier, BlockLayout
+    obj = CacheObject(
+        session_id="test", shared_prefix_id=None, token_range=(0, 99),
+        model_id="test", tier=Tier.L3A, size_bytes=1024, block_count=1,
+        created_at_us=0, last_accessed_at_us=0, ref_count=1,
+        block_layout=BlockLayout.L3A_ALIGNED, is_hibernated=True,
+    )
+    engine._shared_l3a.insert("test-key", obj)
+
+    # Should be found from any node
+    for node_id in [0, 3, 4, 7]:
+        found, _ = engine._find_cache_object_with_node("test-key", from_node_id=node_id)
+        assert found is not None, f"Global L3A should be visible from node {node_id}"
+
+
+def test_session_migration_global_advantage():
+    """With forced session migration (small L1/L2, multiple workers),
+    global L3A must have higher hit rate than local L3A.
+    Uses extreme conditions: tiny L1/L2 force L3A usage, 2 workers force migration."""
+    # Tiny L1 (1MB) and L2 (10MB) — everything goes to L3A immediately
+    config_g = _quick_config()
+    config_g.tiers[0].capacity_bytes = 1 * 1024**2   # 1MB L1 per GPU
+    config_g.tiers[1].capacity_bytes = 10 * 1024**2   # 10MB L2 per worker
+    config_g.tiers[2].capacity_bytes = 50 * 1024**3    # 50GB L3A per worker
+    config_g.service.n_prefill_nodes = 8
+    config_g.service.n_gpus_per_worker = 4  # 2 workers
+    config_g.service.l3a_shared = True
+    config_g.service.l3a_remote_latency_us = 50_000
+
+    import copy
+    config_l = copy.deepcopy(config_g)
+    config_l.service.l3a_shared = False
+    config_l.service.l3a_remote_latency_us = 0
+
+    m_g = SimEngine(config_g).run()
+    m_l = SimEngine(config_l).run()
+
+    total_g = max(1, sum(m_g.savings_events.values()))
+    total_l = max(1, sum(m_l.savings_events.values()))
+    miss_g = m_g.savings_events.get("COLD_MISS", 0) / total_g
+    miss_l = m_l.savings_events.get("COLD_MISS", 0) / total_l
+
+    assert miss_g < miss_l, (
+        f"Global L3A should have fewer misses than local with session migration. "
+        f"Global miss={miss_g:.3f}, Local miss={miss_l:.3f}"
+    )
+
+
 def test_multinode_perf_benchmark(benchmark):
     """10s sim with 4 nodes should complete quickly."""
     config = _stressed_multinode_config(4, "push")

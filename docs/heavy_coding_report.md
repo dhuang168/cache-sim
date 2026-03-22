@@ -151,44 +151,9 @@ Recompute fraction: 9.5k / 38k = 25% (coding) to 16.5k / 46.5k = 35% (agentic_co
 
 This is realistic — in Claude Code, each turn adds 8-15k new tokens (tool output, user message) out of a 40-60k total prompt, so 20-35% is new each turn. The cache saves recomputation of the other 65-80%.
 
-## When Does Global L3A Matter?
+## Global vs Local L3A: The Critical Finding
 
-### Why 8TB Local SSD Is Effective
-
-With 8TB SSD per worker, local L3A has more than enough capacity for the coding workload's KV objects (8-16 GB each). The full SSD capacity sweep (4 workers × 8 GPUs, stressed L1/L2) shows that **local SSD works well until per-worker capacity drops below ~50GB**:
-
-| SSD/Worker | Global (pooled) | Local (per-worker) | Winner | Notes |
-|-----------|----------------|-------------------|--------|-------|
-| **8 TB** | 99.9% (32 TB) | **99.9%** (8 TB) | TIE | Production hardware — both have ample capacity |
-| **4 TB** | 99.9% (16 TB) | **99.9%** (4 TB) | TIE | Hypothetical half-SSD — still no pressure |
-| **2 TB** | 99.9% (8 TB) | **99.9%** (2 TB) | TIE | Hypothetical quarter-SSD — working set fits |
-| 200 GB | 99.9% (800 GB) | 99.9% (200 GB) | TIE | Still sufficient per worker |
-| **50 GB** | **99.9%** (200 GB) | 99.0% (50 GB) | **Global** | Local starts overflowing — cliff begins |
-| **25 GB** | **99.2%** (100 GB) | 90.5% (25 GB) | **Global +8.7%** | Local can't hold coding objects |
-| **15 GB** | **96.2%** (60 GB) | 64.6% (15 GB) | **Global +31.6%** | Catastrophic — smaller than 1 agentic_coding KV |
-
-**Key insight**: Local SSD is effective at **8TB, 4TB, and even 2TB** because L2 (1TB DRAM) absorbs most coding KV objects before they reach L3A.
-
-### Why L3A Sensitivity Is Low: Triage Results
-
-Investigation of object placement reveals the root cause:
-
-| Metric (stressed L1/L2, 4 workers) | Value |
-|-------------------------------------|-------|
-| Total KV objects created | 5,560 |
-| Total working set | 47,836 GB |
-| Objects placed in L1 | 0 (500MB L1 too small for 8-16 GB coding objects) |
-| Objects placed in L2 | 56 (only small chat/batch objects fit in 10 GB L2) |
-| Objects placed in L3A | 5,504 (mean 8.7 GB each) |
-| Working set vs L3A capacity | 200× oversubscription |
-
-**With stressed L2 (10GB)**: Coding objects (8-16 GB) can't fit in L2 → they bypass L2 and go straight to L3A. L3A becomes the primary cache with massive churn (5,504 objects competing for 200 GB). This is where the SSD cliff appears.
-
-**With realistic L2 (1TB)**: Coding objects (8-16 GB) fit in L2. L3A only holds overflow, which is minimal in a 60s sim. SSD size becomes irrelevant because L3A is barely used.
-
-The L2 TTL (300s) is also longer than the sim (60s), so no TTL-driven L2→L3A migration occurs. Even with TTL=10s, only 150 objects migrate.
-
-### Longer Simulation Validation
+### Tier Saturation Over Time
 
 Longer sims confirm the tiers saturate over time (4 workers × 8 GPUs, realistic hardware):
 
