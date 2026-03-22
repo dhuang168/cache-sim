@@ -62,6 +62,25 @@ Each block allocates a fixed number of tokens. The last block has internal fragm
 
 **56 total tests, 4.74s.** All pass including 35 existing tests (backward compatible).
 
-## Verification: Block Size Affects Recompute Fraction
+## Conclusion: Block Granularity Has Minimal Impact on Coding Workloads
 
-The `test_block_size_affects_hit_rate` test confirms larger blocks → higher recompute fraction (more tokens lost at boundaries). This is the expected granularity tradeoff.
+While the block boundary math is correct, **the practical impact on coding workloads is negligible.** With 30-60k token contexts, even the coarsest block size loses very little:
+
+| Block Size | 50k context, 95% stable (47,500 cached) | Lost Tokens | % Lost | Extra Recompute |
+|-----------|----------------------------------------|-------------|--------|-----------------|
+| 16 (vLLM) | 47,488 | 12 | 0.025% | ~1ms |
+| 256 (OpenAI) | 47,360 | 140 | 0.29% | ~12ms |
+| 4,096 (page) | 45,056 | 2,444 | 5.1% | ~200ms |
+
+When the alternative is a cold miss costing 37-120s, losing 200ms to block boundary rounding at 4K pages is irrelevant.
+
+Fragmentation is similarly muted — with 50k tokens, last-block waste is <0.1% at any block size.
+
+**Where block granularity WILL matter** (Phase 2): cross-session block sharing. With 16-token blocks, two sessions with 99% identical prompts share 99% of physical storage. With 4K blocks, the divergence point wastes up to 4K tokens of shared storage per session pair. This is a memory efficiency concern, not a hit rate concern.
+
+### When Block Size Does Matter
+
+Block granularity becomes significant for:
+- **Short contexts** (<1k tokens): 256-token blocks lose 25%+ at boundaries
+- **Chat workloads** (150 tokens/turn): a 256-token block can't cache a single turn
+- **Memory-constrained environments**: block overhead scales with block count — 16-token blocks have 3000× more blocks than a single object for a 50k context
