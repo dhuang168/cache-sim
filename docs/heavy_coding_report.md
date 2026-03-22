@@ -100,12 +100,21 @@ Key observations:
 - **Slot utilization identical** — both near 100%. Every slot is busy whether doing a cache-hit prefill or a cold-miss recompute
 - **The difference is invisible in infrastructure metrics.** Global and local look identical in occupancy, queue depth, and utilization. The 73pt hit rate gap shows up only in **what each slot computes**: global slots do partial recompute (cache hit, fast), local slots do full recompute (cold miss, 14-17s). Same slot utilization, vastly different useful throughput.
 
-**Why don't the plots show the difference?** Because infrastructure metrics (occupancy, queue depth, slot utilization) measure *resource consumption*, not *useful work*. Both modes consume 100% of slots and fill all queues. The difference is subtle:
-- Global: mean prefill 7.5s (mix of cache hits + some long computes)
-- Local: mean prefill 7.7s (more cold misses, but cold miss duration varies by profile — small chat misses are fast)
-- The 73pt hit rate gap translates to only ~3% prefill duration difference because the workload mix includes lightweight profiles that are fast even as cold misses
+**Why don't the per-epoch plots show the difference?** Because per-epoch infrastructure metrics (occupancy, queue depth, slot utilization) measure *resource consumption*, not *request-level performance*. Both modes saturate all slots and queues equally. The difference shows up in **TTFT by cache hit type**:
 
-The real cost of local L3A is **throughput waste**: 73% of prefill slots are doing unnecessary full recomputes that a global cache hit would have avoided. The slots are equally busy, but local mode does far less useful work per slot-second.
+| Component | Global TTFT (mean) | Global Count | Local TTFT (mean) | Local Count |
+|-----------|-------------------|-------------|-------------------|-------------|
+| L1 hit | 4.8s | 10,779 | 6.4s | 19,881 |
+| L3A hit | 31.6s | 23,363 | 33.3s | 5,332 |
+| Cold miss | 16.6s | 21 | **52.8s** | **7,195** |
+
+*(5-min sim, 4 workers)*
+
+Key observations:
+- **Local cold misses take 52.8s** average TTFT (vs global's 16.6s for the rare cold miss). The 52.8s includes both the 17s recompute AND the cascading queue wait from other cold misses blocking slots.
+- **Local has 7,195 cold misses** vs global's 21 — a 340× increase.
+- **Local has more L1 hits** (19,881 vs 10,779) because when sessions re-land on the same worker after a cold miss, the freshly recomputed KV goes into L1 — but this is wasted work since the KV already existed in another worker's L3A.
+- **The `prefill_duration` metric (compute only, no queue wait)** is similar for both modes (~7.5s) because it doesn't capture the cascading queue delay. The real impact shows in TTFT, which includes queue wait.
 
 Dispatch stats at 20 min:
 - Global: 878 affinity, 824,278 non-affinity (0.1% affinity)
