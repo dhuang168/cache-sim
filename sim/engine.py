@@ -533,13 +533,18 @@ class SimEngine:
             # Add remote latency for global L3A access (only when multiple workers exist)
             if hit_tier == Tier.L3A and self._l3a_shared and self._n_workers > 1:
                 t_transfer += self.config.service.l3a_remote_latency_us
-                # Bandwidth contention: concurrent reads share SSD bandwidth
+                # Bandwidth contention: N concurrent readers share one SSD's bandwidth
+                # effective_bw = ssd_bandwidth / N → transfer_time = size * N / bandwidth
                 self._concurrent_l3a_reads += 1
-                if self._concurrent_l3a_reads > self._n_workers:
-                    contention = self._concurrent_l3a_reads / self._n_workers
-                    # Scale the bandwidth portion (not the latency floor)
-                    bandwidth_portion = t_transfer - self.config.service.l3a_remote_latency_us - tier_cfg.latency_floor_us
-                    t_transfer = tier_cfg.latency_floor_us + self.config.service.l3a_remote_latency_us + int(bandwidth_portion * contention)
+                n_readers = self._concurrent_l3a_reads
+                if n_readers > 1:
+                    # Recompute transfer with contended bandwidth
+                    # t_transfer = latency_floor + remote_latency + size * N / bandwidth
+                    t_transfer = (
+                        tier_cfg.latency_floor_us
+                        + self.config.service.l3a_remote_latency_us
+                        + int((kv_bytes / tier_cfg.bandwidth_bytes_per_s) * n_readers * 1_000_000)
+                    )
                     if collecting:
                         self.metrics.l3a_bandwidth_contention_events += 1
             worthwhile = is_cache_worthwhile(

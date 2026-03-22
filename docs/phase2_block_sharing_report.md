@@ -52,6 +52,22 @@ When N concurrent requests access global L3A simultaneously:
 - Penalizes popular shared blocks (framework prefix accessed by many sessions)
 - Local L3A doesn't have this problem — each worker has dedicated SSD bandwidth
 
+## Bandwidth Contention and LRU Self-Regulation
+
+The contention model computes: `effective_bandwidth = ssd_bandwidth / N_concurrent_readers`. A 15 GB framework prefix with 10 concurrent readers on a 7 GB/s SSD: transfer = 21.4s instead of 2.1s.
+
+However, **LRU eviction naturally mitigates this for hot blocks**:
+
+| Block Type | Access Frequency | Typical Tier | Bandwidth | Contention Risk |
+|-----------|-----------------|-------------|-----------|----------------|
+| Framework prefix | Every request | **L1/L2** (pinned by LRU) | 3 TB/s (L1) or 64 GB/s (L2) | **None** — never falls to L3A |
+| Workspace prefix | Every team request | L2 or L3A | 64 GB/s or 7 GB/s | Low-moderate |
+| Session-unique | One user | L3A | 7 GB/s | **None** — single reader |
+
+The framework prefix is accessed so frequently that `last_accessed_at_us` is constantly refreshed → LRU never evicts it from L2 → 64 GB/s dedicated bandwidth per worker → no contention. The TTL code also checks access time and reschedules if recently accessed.
+
+**Contention matters during cache warmup**: when the system first starts and all workers simultaneously fetch the framework prefix from global L3A. Once cached in L2, contention disappears. This is a transient effect, not steady-state.
+
 ## New Metrics
 
 | Metric | Description |
