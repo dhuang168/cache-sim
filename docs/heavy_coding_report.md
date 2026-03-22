@@ -167,12 +167,33 @@ With 8TB SSD per worker, local L3A has more than enough capacity for the coding 
 | **25 GB** | **99.2%** (100 GB) | 90.5% (25 GB) | **Global +8.7%** | Local can't hold coding objects |
 | **15 GB** | **96.2%** (60 GB) | 64.6% (15 GB) | **Global +31.6%** | Catastrophic — smaller than 1 agentic_coding KV |
 
-**Key insight**: Local SSD is effective at **8TB, 4TB, and even 2TB** because the working set in a 60s sim is much smaller than any of these. The crossover only appears below ~50GB/worker, where per-worker capacity approaches the size of a single coding KV object (8-16 GB).
+**Key insight**: Local SSD is effective at **8TB, 4TB, and even 2TB** because L2 (1TB DRAM) absorbs most coding KV objects before they reach L3A.
 
-In production, this means:
-- **Standard servers (2-8 TB NVMe)**: Local SSD is sufficient. Global L3A adds complexity with no benefit.
-- **Constrained environments** (edge, cost-optimized, or very high concurrent sessions): Global L3A's pooling advantage becomes significant.
-- **Longer runtimes**: The working set grows over time (see simulation duration sensitivity above). At production scale (hours of runtime, thousands of concurrent sessions), the crossover point shifts to higher SSD capacities.
+### Why L3A Sensitivity Is Low: Triage Results
+
+Investigation of object placement reveals the root cause:
+
+| Metric (stressed L1/L2, 4 workers) | Value |
+|-------------------------------------|-------|
+| Total KV objects created | 5,560 |
+| Total working set | 47,836 GB |
+| Objects placed in L1 | 0 (500MB L1 too small for 8-16 GB coding objects) |
+| Objects placed in L2 | 56 (only small chat/batch objects fit in 10 GB L2) |
+| Objects placed in L3A | 5,504 (mean 8.7 GB each) |
+| Working set vs L3A capacity | 200× oversubscription |
+
+**With stressed L2 (10GB)**: Coding objects (8-16 GB) can't fit in L2 → they bypass L2 and go straight to L3A. L3A becomes the primary cache with massive churn (5,504 objects competing for 200 GB). This is where the SSD cliff appears.
+
+**With realistic L2 (1TB)**: Coding objects (8-16 GB) fit in L2. L3A only holds overflow, which is minimal in a 60s sim. SSD size becomes irrelevant because L3A is barely used.
+
+The L2 TTL (300s) is also longer than the sim (60s), so no TTL-driven L2→L3A migration occurs. Even with TTL=10s, only 150 objects migrate.
+
+### Implications for Production
+
+- **Standard servers (2-8 TB NVMe)**: Local SSD is sufficient because 1TB+ L2 DRAM absorbs most coding objects. L3A is a safety net, not the primary cache.
+- **Constrained L2 environments** (small host DRAM, many GPUs per host): L3A becomes the primary cache, and SSD capacity matters. Global L3A pooling helps.
+- **Longer runtimes** (hours): L2 eventually fills as sessions accumulate. L3A importance grows, and the SSD cliff shifts to higher capacities.
+- **Higher concurrency**: More concurrent coding sessions overwhelm L2 faster, making L3A critical sooner.
 
 ## Key Findings
 
