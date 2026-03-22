@@ -95,15 +95,21 @@ Key observations:
 Global (green) vs Local (orange, dashed) — same hardware, different L3A mode.
 
 Key observations:
-- **L1/L2 occupancy identical** — both modes use the same per-worker L1/L2
-- **L3A occupancy identical** (~100%) — both modes have the same per-worker SSD capacity
-- **Queue depth diverges** — local L3A has higher queue depth because cold misses (14-17s each) block prefill slots
-- **Slot utilization** — global ~lower (cache hits free slots faster), local ~higher (cold misses occupy slots longer)
-- **Cold evictions/epoch** — similar rate, but local L3A's evictions cause more damage because evicted objects can't be found cross-worker
+- **L1/L2/L3A occupancy identical** — both modes use the same per-worker storage, both saturated (~100% L2/L3A)
+- **Queue depth identical** — both modes are equally saturated (~4000 depth, near max). The system is throughput-limited regardless of cache mode
+- **Slot utilization identical** — both near 100%. Every slot is busy whether doing a cache-hit prefill or a cold-miss recompute
+- **The difference is invisible in infrastructure metrics.** Global and local look identical in occupancy, queue depth, and utilization. The 73pt hit rate gap shows up only in **what each slot computes**: global slots do partial recompute (cache hit, fast), local slots do full recompute (cold miss, 14-17s). Same slot utilization, vastly different useful throughput.
+
+**Why don't the plots show the difference?** Because infrastructure metrics (occupancy, queue depth, slot utilization) measure *resource consumption*, not *useful work*. Both modes consume 100% of slots and fill all queues. The difference is subtle:
+- Global: mean prefill 7.5s (mix of cache hits + some long computes)
+- Local: mean prefill 7.7s (more cold misses, but cold miss duration varies by profile — small chat misses are fast)
+- The 73pt hit rate gap translates to only ~3% prefill duration difference because the workload mix includes lightweight profiles that are fast even as cold misses
+
+The real cost of local L3A is **throughput waste**: 73% of prefill slots are doing unnecessary full recomputes that a global cache hit would have avoided. The slots are equally busy, but local mode does far less useful work per slot-second.
 
 Dispatch stats at 20 min:
-- Global: 878 affinity dispatches, 824,278 non-affinity (0.1% affinity)
-- Local: 194,950 affinity, 630,206 non-affinity (24% affinity — higher because more cold misses → more objects stay in L1/L2 of the recomputing node)
+- Global: 878 affinity, 824,278 non-affinity (0.1% affinity)
+- Local: 194,950 affinity, 630,206 non-affinity (24% affinity)
 
 ---
 
@@ -138,9 +144,10 @@ Each migrated request with local L3A is a **cold miss** (14-17s full recompute) 
 |---------|----------|
 | **Global L3A is essential** for multi-worker deployments | 99.8% vs 26.6% hit rate at 20 min (73pt gap) |
 | **Session migration is the mechanism** | 97% non-affinity dispatch at steady state |
-| **Prefill compute is the throughput bottleneck** | 14-17s per coding request → ~39 QPS/worker |
-| **L1 is critical but temporary** | 98% L1 hits at 1 min, but saturates by 5 min |
-| **50ms global L3A latency is negligible** | <0.3% overhead on 14-17s compute |
+| **Infrastructure metrics don't show the gap** | Queue depth, slot utilization, occupancy are identical for global and local — the difference is in useful work per slot |
+| **Prefill compute is the throughput bottleneck** | Mean 7.5s/request, limited by 14-17s coding prefills → ~39 QPS/worker |
+| **L1 is critical but temporary** | 98% L1 hits at 1 min, saturates by 5 min |
+| **50ms global L3A latency is negligible** | <0.3% overhead on 7.5s mean prefill |
 | **TTL has no impact** on global vs local | Both modes insensitive to L2 TTL (10-300s) |
 | **Recompute fraction ~31% is structural** | Driven by 8-15k new input tokens/turn, not instability |
 
