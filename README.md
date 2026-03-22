@@ -158,6 +158,7 @@ cache_sim/
 │   └── test_multinode.py       # 14 multi-node dispatch + topology tests
 ├── docs/
 │   ├── architecture.md         # How the simulation works end-to-end
+│   ├── vllm_comparison.md      # Comparison with vLLM's implementation
 │   ├── user_manual.md          # Full usage instructions
 │   ├── heavy_coding_report.md  # Heavy coding workload analysis report
 │   └── example_report.md       # Example sanity-check report
