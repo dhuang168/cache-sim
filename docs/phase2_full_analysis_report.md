@@ -66,13 +66,32 @@ Sharing doesn't affect hit rate or throughput — it's a **memory efficiency** o
 
 ## 6. Load Sensitivity (4 workers, Global L3A)
 
-| Peak Rate | Events | Completed | Dropped | QW Mean | TTFT Mean | Slot Util |
-|-----------|--------|-----------|---------|---------|-----------|----------|
-| 1 | 8,288 | 8,288 | **0%** | 19ms | 21.3s | 15% |
-| 3 | 24,875 | 23,781 | 4% | 2.8s | 25.6s | 48% |
-| 5 | 41,364 | 6,382 | **85%** | 142s | 206s | 84% |
+| Peak | Arrival | Throughput | Dropped | Slot Util | QW Mean | TTFT Mean |
+|------|---------|-----------|---------|-----------|---------|-----------|
+| 1 | 7.0/s | 7.0/s | **0%** | 15% | 19ms | 21.3s |
+| 2 | 14.0/s | 14.0/s | **0%** | 32% | 24ms | 22.5s |
+| 3 | 20.9/s | 20.0/s | 4% | 48% | 2.8s | 25.6s |
+| 4 | 27.6/s | 24.4/s | 12% | 55% | 10.3s | 30.7s |
+| 5* | 34.8/s | 5.4/s | 85% | 84% | 142s | 206s |
 
-The system transitions from **underloaded** (peak=1, 15% slots) through **balanced** (peak=3, 48% slots, 4% drops) to **severely overloaded** (peak=5, 84% slots, 85% drops). The capacity cliff is steep: 67% increase in arrival rate (3→5) causes 20× more drops.
+*Peak=5 is seed-dependent: 85% drops at seed=42, 46% at seed=123, 21% at seed=456. At this arrival rate, the system is at the edge of capacity — whether it collapses depends on the timing of agentic_coding bursts.
+
+**Max theoretical throughput** = 1024 slots / 18.9s mean prefill = **54 req/s**. The system operates linearly up to ~20 req/s (peak=3, 48% utilization), starts degrading at ~28 req/s (peak=4, 55% utilization, 12% drops), and becomes unstable at ~35 req/s (peak=5).
+
+**Why 48% utilization at peak=3**: Arrival rate (20.9/s) is 39% of max throughput (54/s). The observed 48% is higher because slot utilization includes queue wait time, not just prefill compute. The 4% drops are from bursty arrivals that momentarily exceed per-node capacity.
+
+## 7. Sharing Impact on Eviction Pressure
+
+| Metric | No Sharing | Sharing | Impact |
+|--------|----------|---------|--------|
+| L1→L2 evictions | 17,978 | **25,600** | +42% more |
+| Cold evictions | 10,943 | **14,370** | +31% more |
+| L3A contention | 516 | 493 | -4% less |
+| Memory saved | — | **127 TB** | Cumulative deduplication |
+
+**Surprise**: Sharing increases eviction pressure. Shared prefix objects (framework 20K, workspace 5K tokens) stay pinned in L1 (high ref_count, constantly accessed by new sessions). They consume L1 capacity → less room for session-unique KV → more session objects evicted to L2/L3A.
+
+This is the **sharing memory paradox**: sharing saves total memory (127 TB fewer bytes stored) but the pinned shared objects create more churn for non-shared objects. The net effect on throughput is neutral (identical hit rates and completion counts) because the evicted session objects land in L2/L3A and are still accessible.
 
 ## Summary
 
@@ -83,7 +102,8 @@ The system transitions from **underloaded** (peak=1, 15% slots) through **balanc
 | **Pull dispatch preferred** | +0.5% throughput, -8% queue wait, -40% contention |
 | **TTL ≈ LRU** at controlled load | Identical throughput and TTFT |
 | **Sharing saves 127 TB** | Memory optimization, no hit rate impact |
-| **Capacity cliff at peak=5** | 85% drops, 142s queue wait |
+| **Capacity cliff at peak=4-5** | 12% drops at peak=4, seed-dependent collapse at peak=5 |
+| **Sharing paradox** | Saves 127TB but increases L1 evictions by 42% (pinned shared objects consume L1) |
 | **Prefill compute is the bottleneck** | Mean 18.9s, slot utilization drives drops |
 
 ## Configuration Reference
