@@ -28,7 +28,7 @@ def test_prefill_oracle_clamp():
     # Below minimum should clamp
     assert oracle.prefill_latency_us(1) == 45000
     # Above maximum should clamp
-    assert oracle.prefill_latency_us(100000) == 17000000
+    assert oracle.prefill_latency_us(500000) == 600000000
 
 
 def test_transfer_time():
