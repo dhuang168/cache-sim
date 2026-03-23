@@ -112,6 +112,26 @@ These are **mandatory** — must all pass before any exploratory run. They test 
 13. `test_global_l3a_cross_worker_access` — global L3A visible from any node
 14. `test_session_migration_global_advantage` — tiny L1/L2 + 2 workers → global > local hit rate
 
+### Chunk Store Unit Tests (`tests/test_chunk_store.py`)
+10 tests for ChunkTierStore and ChunkIndex:
+- novel_insert, dedup_insert, deref_removes, deref_keeps, capacity_check
+- evict_lru_prefers_single_ref, occupancy_pct
+- chunk_index_consecutive_lookup, chunk_index_gap_stops_consecutive, chunk_hash_for
+
+### Chunk Dedup Integration Tests (`tests/test_chunk_dedup.py`)
+11 tests for chunk-level deduplication and demand-pull promotion:
+1. `test_per_session_dedup_matches_default` — per_session mode produces standard results
+2. `test_chunk_requires_block_size` — chunk mode validates block_size_tokens > 0
+3. `test_demand_pull_requires_lru` — demand_pull validates eviction_policy=lru
+4. `test_chunk_dedup_ratio_positive` — shared prefixes produce >10% dedup ratio
+5. `test_chunk_dedup_reduces_storage` — chunk mode deduplicates shared prefix chunks
+6. `test_chunk_consecutive_lookup_hit` — chunk lookup finds cached chunks
+7. `test_lmcache_config_loads_and_runs` — configs/lmcache.json works end-to-end
+8. `test_demand_pull_promotes_on_hit` — demand-pull promotes chunks from lower tiers
+9. `test_demand_pull_no_ttl_scheduling` — no TTL migrations in demand_pull mode
+10. `test_demand_pull_object_mode` — demand-pull works with per-session objects too
+11. `test_chunk_mode_perf_benchmark` — 10s chunk sim completes in <15s wall-clock
+
 ### Disaggregated P/D Tests (`tests/test_disaggregated.py`)
 10 tests for disaggregated prefill-decode separation:
 1. `test_backward_compat_disaggregated_false` — explicit disaggregated=false matches default
@@ -234,6 +254,33 @@ Added for multi-node prefill dispatch (all have backward-compatible defaults):
 - Intra-worker L2 hit: no penalty (shared DRAM on same host)
 - Intra-worker L1 hit from another GPU: small NVLink penalty (`inter_node_latency_us` only)
 - Inter-worker hit: full `inter_node_latency_us` + bandwidth penalty
+
+## LMCache-Compatible Chunk Dedup Mode
+
+When `cache.deduplication="chunk"`, KV is stored at **fixed-size chunk granularity** (default 256 tokens) with **hash-based deduplication**. Identical chunks across sessions share storage via ref counting.
+
+- **Shared prefix chunks** hash by profile: `chunk-{profile}-{index}` — deduped across all sessions of the same profile.
+- **Session-unique chunks** hash by session: `chunk-{session}-{index}` — unique per session.
+- **Demand-pull promotion** (`cache.tier_migration="demand_pull"`): on cache hit at L2/L3A, promote chunks to L1. No TTL scheduling. Pure LRU eviction.
+- **Cascade eviction**: L1 evictions cascade to L2, L2 evictions cascade to L3A.
+
+**New `CacheConfig` Fields:**
+
+| Field | Default | Options |
+|-------|---------|---------|
+| `deduplication` | `"per_session"` | `"per_session"` (monolithic objects) or `"chunk"` (LMCache-style) |
+| `tier_migration` | `"ttl_push"` | `"ttl_push"` (scheduled demotion) or `"demand_pull"` (promote on hit) |
+
+**Constraints:**
+- `deduplication="chunk"` requires `block_size_tokens > 0`
+- `tier_migration="demand_pull"` requires `eviction_policy="lru"`
+
+**Key data structures** (`sim/chunk_store.py`):
+- `ChunkObject` — per-chunk metadata with ref counting
+- `ChunkTierStore` — dedup-aware store with `insert_or_ref`, `deref`, LRU eviction
+- `ChunkIndex` — tracks cached chunks per session for consecutive lookup
+
+**Reference config:** `configs/lmcache.json` — chunk dedup + demand-pull + LRU (full LMCache-style).
 
 ## Disaggregated Prefill-Decode Mode
 

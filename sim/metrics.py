@@ -90,6 +90,12 @@ class MetricsCollector:
     max_replication_factor: list[int] = field(default_factory=list)  # most-replicated object per epoch
     shared_prefix_worker_distribution: dict[str, int] = field(default_factory=dict)  # cache_key → n_workers having a copy
 
+    # Chunk dedup metrics
+    chunk_dedup_hits: int = 0
+    chunk_novel_inserts: int = 0
+    chunk_total_logical: int = 0
+    tier_promotions: int = 0
+
     # Disaggregated P/D metrics
     kv_transfer_us: list[int] = field(default_factory=list)
     kv_transfer_bytes: list[int] = field(default_factory=list)
@@ -235,6 +241,17 @@ class MetricsCollector:
 
         if self.affinity_dispatches + self.non_affinity_dispatches > 0:
             result["dispatch_stats"] = dispatch_stats
+
+        # Chunk dedup stats
+        if self.chunk_total_logical > 0:
+            result["chunk_dedup"] = {
+                "dedup_ratio": r(self.chunk_dedup_hits / self.chunk_total_logical),
+                "novel_chunks": self.chunk_novel_inserts,
+                "dedup_hits": self.chunk_dedup_hits,
+                "storage_efficiency": r(1.0 - (self.chunk_novel_inserts / max(1, self.chunk_total_logical))),
+            }
+        if self.tier_promotions > 0:
+            result["demand_pull"] = {"promotions": self.tier_promotions}
 
         # Disaggregated P/D stats
         if self.kv_transfer_us:

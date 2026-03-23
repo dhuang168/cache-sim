@@ -18,6 +18,7 @@ from sim.oracle import PrefillOracle, DecodeOracle, transfer_time_us, is_cache_w
 from sim.eviction import EvictionEngine
 from sim.metrics import MetricsCollector
 from sim.node import PrefillNode, DecodeNode
+from sim.chunk_store import ChunkObject, ChunkTierStore, ChunkIndex, chunk_hash_for
 from sim.dispatch import PushDispatcher, SmartPushDispatcher, PullDispatcher
 
 
@@ -45,6 +46,7 @@ class SimEngine:
     """
 
     def __init__(self, config: SimConfig):
+        config.cache.validate()
         if config.enable_suffix_cache:
             raise NotImplementedError("Suffix cache is a v2 feature")
         if config.enable_l3b_object_store:
@@ -170,6 +172,22 @@ class SimEngine:
                     decode_queue_max=config.service.decode_queue_max,
                 )
                 self.decode_nodes.append(dn)
+
+        # Chunk dedup mode
+        self._chunk_mode = config.cache.deduplication == "chunk"
+        self._demand_pull = config.cache.tier_migration == "demand_pull"
+        self._chunk_stores: dict[int, dict[Tier, ChunkTierStore]] = {}  # node_id -> {tier -> store}
+        self._chunk_index = ChunkIndex() if self._chunk_mode else None
+        if self._chunk_mode:
+            block_tokens = config.cache.block_size_tokens
+            self._chunk_size_bytes = kv_size_bytes(block_tokens, config.model)
+            for node in self.nodes:
+                l1_cs = ChunkTierStore(l1_cfg.name, l1_cfg.capacity_bytes, l1_cfg.block_size_bytes)
+                l2_cs = ChunkTierStore(l2_cfg.name, l2_cfg.capacity_bytes, l2_cfg.block_size_bytes)
+                l3a_cs = ChunkTierStore(l3a_cfg.name, l3a_cfg.capacity_bytes, l3a_cfg.block_size_bytes)
+                self._chunk_stores[node.node_id] = {
+                    Tier.L1: l1_cs, Tier.L2: l2_cs, Tier.L3A: l3a_cs,
+                }
 
         # Oracles
         table_path = _BENCHMARK_DIR / f"prefill_70b_a100.json"
@@ -473,15 +491,29 @@ class SimEngine:
             node = self.dispatcher.dispatch(session_id, request_id, payload, self.sim_clock_us)
             payload["node_id"] = node.node_id
 
-        # Cache lookup — pick the deepest match across both tries
-        # For local L3A, only search the assigned node's worker SSD
-        lookup_node_id = payload.get("node_id", None)  # set by push dispatch, None for pull
+        # Cache lookup
+        lookup_node_id = payload.get("node_id", None)
         hit_tier = None
         hit_key = None
         hit_node_id = None
         best_depth = 0
-        if sess and sess.token_hash_count > 0:
-            # Check shared prefix trie
+
+        if self._chunk_mode:
+            # Chunk-mode lookup: consecutive cached chunks from pos 0
+            assigned_node_id = payload.get("node_id", 0)
+            chunk_hit_tier, cached_tokens, uncached_tokens = self._chunk_cache_lookup(
+                session_id, profile, total_context, input_tokens, assigned_node_id,
+            )
+            hit_tier = chunk_hit_tier
+            hit_node_id = assigned_node_id if hit_tier else None
+            # Demand-pull: promote cached chunks to L1
+            if self._demand_pull and hit_tier and hit_tier != Tier.L1:
+                self._promote_to_l1_chunks(
+                    session_id, profile, total_context, assigned_node_id, collecting,
+                )
+                hit_tier = Tier.L1  # after promotion
+        elif sess and sess.token_hash_count > 0:
+            # Object-mode lookup: trie-based
             sp_key, sp_depth = self.shared_prefix_trie.lookup(sess.token_hash_count)
             if sp_key and sp_depth > 0:
                 sp_obj, sp_nid = self._find_cache_object_with_node(sp_key, from_node_id=lookup_node_id)
@@ -491,7 +523,6 @@ class SimEngine:
                     hit_tier = sp_obj.tier
                     hit_node_id = sp_nid
 
-            # Check session trie — prefer if deeper match
             s_trie = self.session_tries.get(session_id)
             if s_trie:
                 s_key, s_depth = s_trie.lookup(sess.token_hash_count)
@@ -502,6 +533,12 @@ class SimEngine:
                         hit_tier = s_obj.tier
                         hit_node_id = s_nid
                         best_depth = s_depth
+
+            # Demand-pull: promote hit object to L1 (object mode)
+            if self._demand_pull and hit_tier and hit_tier != Tier.L1 and hit_key:
+                assigned_node_id_dp = payload.get("node_id", 0)
+                self._promote_to_l1_object(hit_key, hit_tier, assigned_node_id_dp, collecting)
+                hit_tier = Tier.L1  # after promotion
 
         # For push mode, check if hit is on assigned node or remote
         assigned_node_id = payload.get("node_id", 0)
@@ -907,14 +944,17 @@ class SimEngine:
         # FSM: DECODING -> KV_WRITE
         self._transition(request_id, RequestState.KV_WRITE)
 
-        # Write KV to L1 cache
+        # Write KV to cache
         session_id = event.session_id
         total_ctx = payload.get("total_context", 0)
         output_tokens = payload.get("output_tokens", 0)
         total_tokens = total_ctx + output_tokens
         node_id = payload.get("node_id", 0)
 
-        if total_tokens > 0:
+        if total_tokens > 0 and self._chunk_mode:
+            profile = self._get_profile(payload.get("profile", ""))
+            self._place_kv_chunks(session_id, profile, total_tokens, node_id, collecting)
+        elif total_tokens > 0:
             size = kv_size_bytes(total_tokens, self.config.model)
             cache_key = f"kv-{session_id}-{request_id}"
             sess = self.sessions.get(session_id)
@@ -981,6 +1021,225 @@ class SimEngine:
         # Cleanup
         self.request_states.pop(request_id, None)
         self.request_arrival_us.pop(request_id, None)
+
+    # ─── Chunk-mode helpers ───
+
+    def _chunk_cache_lookup(
+        self, session_id: str, profile, total_context: int, input_tokens: int, node_id: int,
+    ) -> tuple[Tier | None, int, int]:
+        """Chunk-mode cache lookup. Returns (hit_tier, cached_tokens, uncached_tokens)."""
+        block_tokens = self.config.cache.block_size_tokens
+        total_chunks = total_context // block_tokens if block_tokens > 0 else 0
+        if total_chunks == 0:
+            return None, 0, total_context + input_tokens
+
+        stores = self._get_chunk_stores_for_node(node_id)
+        cached_chunks, hit_tier = self._chunk_index.lookup_consecutive(
+            session_id, total_chunks, stores,
+        )
+        cached_tokens = cached_chunks * block_tokens
+        uncached_tokens = max(1, total_context - cached_tokens + input_tokens)
+        return hit_tier if cached_chunks > 0 else None, cached_tokens, uncached_tokens
+
+    def _place_kv_chunks(
+        self, session_id: str, profile, total_tokens: int, node_id: int, collecting: bool,
+    ) -> None:
+        """Chunk-mode KV write: split into chunks, dedup-insert, track metrics."""
+        block_tokens = self.config.cache.block_size_tokens
+        total_chunks = total_tokens // block_tokens if block_tokens > 0 else 0
+        if total_chunks == 0:
+            return
+        shared_chunks = profile.shared_system_prefix_tokens // block_tokens
+        chunk_size = self._chunk_size_bytes
+        stores = self._chunk_stores[node_id]
+        registered = []
+
+        for i in range(total_chunks):
+            ch = chunk_hash_for(profile.name, session_id, i, shared_chunks)
+            chunk_obj = ChunkObject(
+                chunk_hash=ch,
+                tier=Tier.L1,
+                size_bytes=chunk_size,
+                block_count=allocated_blocks(chunk_size, stores[Tier.L1].block_size_bytes),
+                created_at_us=self.sim_clock_us,
+                last_accessed_at_us=self.sim_clock_us,
+                ref_count=1,
+                block_layout=TIER_TO_LAYOUT[Tier.L1],
+                chunk_index=i,
+                profile_name=profile.name,
+            )
+
+            # Try L1
+            l1 = stores[Tier.L1]
+            if not l1.can_fit(chunk_size):
+                # Evict L1 chunks and cascade them to L2
+                evicted = l1.evict_lru(chunk_size)
+                self._cascade_evicted_chunks(evicted, Tier.L1, stores)
+            if l1.can_fit(chunk_size):
+                novel = l1.insert_or_ref(ch, chunk_obj)
+                if collecting:
+                    if novel:
+                        self.metrics.chunk_novel_inserts += 1
+                    else:
+                        self.metrics.chunk_dedup_hits += 1
+                    self.metrics.chunk_total_logical += 1
+                registered.append((i, ch))
+                continue
+
+            # Try L2
+            chunk_obj.tier = Tier.L2
+            chunk_obj.block_count = allocated_blocks(chunk_size, stores[Tier.L2].block_size_bytes)
+            chunk_obj.block_layout = TIER_TO_LAYOUT[Tier.L2]
+            l2 = stores[Tier.L2]
+            if not l2.can_fit(chunk_size):
+                evicted = l2.evict_lru(chunk_size)
+                self._cascade_evicted_chunks(evicted, Tier.L2, stores)
+            if l2.can_fit(chunk_size):
+                novel = l2.insert_or_ref(ch, chunk_obj)
+                if collecting:
+                    if novel:
+                        self.metrics.chunk_novel_inserts += 1
+                    else:
+                        self.metrics.chunk_dedup_hits += 1
+                    self.metrics.chunk_total_logical += 1
+                registered.append((i, ch))
+                continue
+
+            # Try L3A
+            chunk_obj.tier = Tier.L3A
+            chunk_obj.block_count = allocated_blocks(chunk_size, stores[Tier.L3A].block_size_bytes)
+            chunk_obj.block_layout = TIER_TO_LAYOUT[Tier.L3A]
+            chunk_obj.is_hibernated = True
+            l3a = stores[Tier.L3A]
+            if not l3a.can_fit(chunk_size):
+                l3a.evict_lru(chunk_size)  # L3A eviction = permanent loss
+            if l3a.can_fit(chunk_size):
+                novel = l3a.insert_or_ref(ch, chunk_obj)
+                if collecting:
+                    if novel:
+                        self.metrics.chunk_novel_inserts += 1
+                    else:
+                        self.metrics.chunk_dedup_hits += 1
+                    self.metrics.chunk_total_logical += 1
+                registered.append((i, ch))
+
+        self._chunk_index.register_chunks(session_id, registered)
+
+    def _get_chunk_stores_for_node(self, node_id: int) -> list[ChunkTierStore]:
+        """Return [L1, L2, L3A] chunk stores for a node, in search order."""
+        stores = self._chunk_stores.get(node_id, {})
+        return [stores.get(Tier.L1), stores.get(Tier.L2), stores.get(Tier.L3A)]
+
+    def _cascade_evicted_chunks(
+        self, evicted_hashes: list[str], from_tier: Tier,
+        stores: dict[Tier, ChunkTierStore],
+    ) -> None:
+        """Move evicted chunks to the next lower tier (L1→L2, L2→L3A)."""
+        if from_tier == Tier.L1:
+            target = stores[Tier.L2]
+            target_tier = Tier.L2
+        elif from_tier == Tier.L2:
+            target = stores[Tier.L3A]
+            target_tier = Tier.L3A
+        else:
+            return  # L3A eviction = permanent loss
+
+        for ch in evicted_hashes:
+            # Reconstruct a minimal chunk object for the target tier
+            # The evicted chunk was already removed from the source store
+            # We need to re-insert it at the target tier
+            chunk_size = self._chunk_size_bytes
+            chunk_obj = ChunkObject(
+                chunk_hash=ch,
+                tier=target_tier,
+                size_bytes=chunk_size,
+                block_count=allocated_blocks(chunk_size, target.block_size_bytes),
+                created_at_us=self.sim_clock_us,
+                last_accessed_at_us=self.sim_clock_us,
+                ref_count=1,
+                block_layout=TIER_TO_LAYOUT[target_tier],
+                is_hibernated=(target_tier == Tier.L3A),
+            )
+            if not target.can_fit(chunk_size):
+                if target_tier == Tier.L2:
+                    evicted_l2 = target.evict_lru(chunk_size)
+                    self._cascade_evicted_chunks(evicted_l2, Tier.L2, stores)
+                else:
+                    target.evict_lru(chunk_size)  # L3A = permanent loss
+            if target.can_fit(chunk_size):
+                target.insert_or_ref(ch, chunk_obj)
+
+    def _promote_to_l1_chunks(
+        self, session_id: str, profile, total_context: int, node_id: int, collecting: bool,
+    ) -> None:
+        """Demand-pull: promote cached chunks from L2/L3A to L1."""
+        block_tokens = self.config.cache.block_size_tokens
+        total_chunks = total_context // block_tokens if block_tokens > 0 else 0
+        shared_chunks = profile.shared_system_prefix_tokens // block_tokens
+        stores = self._chunk_stores[node_id]
+        l1 = stores[Tier.L1]
+
+        session_map = self._chunk_index._session_chunks.get(session_id, {})
+        for i in range(total_chunks):
+            ch = session_map.get(i)
+            if ch is None:
+                break
+            # Already in L1?
+            if l1.get(ch):
+                l1.get(ch).last_accessed_at_us = self.sim_clock_us
+                continue
+            # Find in L2 or L3A
+            for tier in [Tier.L2, Tier.L3A]:
+                store = stores[tier]
+                obj = store.get(ch)
+                if obj:
+                    # Promote: remove from lower tier, insert into L1
+                    store.remove(ch)
+                    obj.tier = Tier.L1
+                    obj.block_count = allocated_blocks(obj.size_bytes, l1.block_size_bytes)
+                    obj.block_layout = TIER_TO_LAYOUT[Tier.L1]
+                    obj.last_accessed_at_us = self.sim_clock_us
+                    obj.is_hibernated = False
+                    if not l1.can_fit(obj.size_bytes):
+                        l1.evict_lru(obj.size_bytes)
+                    if l1.can_fit(obj.size_bytes):
+                        l1.insert_or_ref(ch, obj)
+                        if collecting:
+                            self.metrics.tier_promotions += 1
+                    else:
+                        # Can't fit in L1 even after eviction, put back
+                        store.insert_or_ref(ch, obj)
+                    break
+
+    def _promote_to_l1_object(
+        self, hit_key: str, hit_tier: Tier, node_id: int, collecting: bool,
+    ) -> None:
+        """Demand-pull: promote a CacheObject from L2/L3A to L1."""
+        node = self._get_node(node_id)
+        if hit_tier == Tier.L2:
+            obj = node.l2_store.remove(hit_key)
+        elif hit_tier == Tier.L3A:
+            l3a = self._get_l3a_for_node(node_id)
+            obj = l3a.remove(hit_key)
+        else:
+            return
+        if obj is None:
+            return
+
+        l1 = node.l1_store
+        obj.tier = Tier.L1
+        obj.block_count = allocated_blocks(obj.size_bytes, l1.block_size_bytes)
+        obj.block_layout = TIER_TO_LAYOUT[Tier.L1]
+        obj.last_accessed_at_us = self.sim_clock_us
+        obj.is_hibernated = False
+        if not l1.can_fit(obj.size_bytes):
+            eviction = self._get_node_eviction(node_id)
+            eviction.evict_l1_to_l2(obj.size_bytes)
+        if l1.can_fit(obj.size_bytes):
+            l1.insert(hit_key, obj)
+            if collecting:
+                self.metrics.tier_promotions += 1
+        # If still can't fit, object is lost (same as current eviction behavior)
 
     # ─── TTL and eviction ───
 
@@ -1141,21 +1400,42 @@ class SimEngine:
         self.metrics.l3a_concurrent_reads.append(self._concurrent_l3a_reads)
 
         # Record per-node and aggregate tier occupancy
-        # L1 is per-GPU, L2 is per-worker (shared by GPUs on same host)
-        agg_l1_used = 0
-        agg_l1_cap = 0
-        for node in self.nodes:
-            l1_occ = node.l1_store.occupancy_pct * 100.0
-            l2_occ = node.l2_store.occupancy_pct * 100.0
-            self.metrics.per_node_l1_occupancy_pct[node.node_id].append(l1_occ)
-            self.metrics.per_node_l2_occupancy_pct[node.node_id].append(l2_occ)
-            self.metrics.per_node_queue_depth[node.node_id].append(len(node.pending_prefills))
-            agg_l1_used += node.l1_store.used_bytes
-            agg_l1_cap += node.l1_store.capacity_bytes
+        if self._chunk_mode:
+            # Chunk-mode: use chunk stores for occupancy
+            agg_l1_used = 0
+            agg_l1_cap = 0
+            for node in self.nodes:
+                cs = self._chunk_stores.get(node.node_id, {})
+                l1_cs = cs.get(Tier.L1)
+                l2_cs = cs.get(Tier.L2)
+                l1_occ = l1_cs.occupancy_pct * 100.0 if l1_cs else 0.0
+                l2_occ = l2_cs.occupancy_pct * 100.0 if l2_cs else 0.0
+                self.metrics.per_node_l1_occupancy_pct[node.node_id].append(l1_occ)
+                self.metrics.per_node_l2_occupancy_pct[node.node_id].append(l2_occ)
+                self.metrics.per_node_queue_depth[node.node_id].append(len(node.pending_prefills))
+                if l1_cs:
+                    agg_l1_used += l1_cs.used_bytes
+                    agg_l1_cap += l1_cs.capacity_bytes
+            agg_l2_used = sum(cs.get(Tier.L2, ChunkTierStore("", 0, 1)).used_bytes
+                              for cs in self._chunk_stores.values())
+            agg_l2_cap = sum(cs.get(Tier.L2, ChunkTierStore("", 0, 1)).capacity_bytes
+                             for cs in self._chunk_stores.values())
+        else:
+            # Object-mode: use TierStores
+            agg_l1_used = 0
+            agg_l1_cap = 0
+            for node in self.nodes:
+                l1_occ = node.l1_store.occupancy_pct * 100.0
+                l2_occ = node.l2_store.occupancy_pct * 100.0
+                self.metrics.per_node_l1_occupancy_pct[node.node_id].append(l1_occ)
+                self.metrics.per_node_l2_occupancy_pct[node.node_id].append(l2_occ)
+                self.metrics.per_node_queue_depth[node.node_id].append(len(node.pending_prefills))
+                agg_l1_used += node.l1_store.used_bytes
+                agg_l1_cap += node.l1_store.capacity_bytes
 
-        # Aggregate L2 by worker (avoid double-counting shared L2 stores)
-        agg_l2_used = sum(s.used_bytes for s in self._worker_l2_stores)
-        agg_l2_cap = sum(s.capacity_bytes for s in self._worker_l2_stores)
+            # Aggregate L2 by worker (avoid double-counting shared L2 stores)
+            agg_l2_used = sum(s.used_bytes for s in self._worker_l2_stores)
+            agg_l2_cap = sum(s.capacity_bytes for s in self._worker_l2_stores)
 
         self.metrics.tier_occupancy_pct["L1"].append(
             (agg_l1_used / agg_l1_cap * 100.0) if agg_l1_cap > 0 else 0.0
@@ -1163,7 +1443,15 @@ class SimEngine:
         self.metrics.tier_occupancy_pct["L2"].append(
             (agg_l2_used / agg_l2_cap * 100.0) if agg_l2_cap > 0 else 0.0
         )
-        if self._l3a_shared:
+        if self._chunk_mode:
+            agg_l3a_used = sum(cs.get(Tier.L3A, ChunkTierStore("", 0, 1)).used_bytes
+                               for cs in self._chunk_stores.values())
+            agg_l3a_cap = sum(cs.get(Tier.L3A, ChunkTierStore("", 0, 1)).capacity_bytes
+                              for cs in self._chunk_stores.values())
+            self.metrics.tier_occupancy_pct["L3A"].append(
+                (agg_l3a_used / agg_l3a_cap * 100.0) if agg_l3a_cap > 0 else 0.0
+            )
+        elif self._l3a_shared:
             self.metrics.tier_occupancy_pct["L3A"].append(
                 self._shared_l3a.occupancy_pct * 100.0
             )

@@ -86,7 +86,19 @@ class CacheConfig:
     block_size_tokens: int = 0  # 0=legacy (whole object), 16=vLLM, 256=OpenAI, 4096=page-aligned
     block_alignment: str = "fixed"  # "fixed" (uniform blocks) or "message" (Anthropic-style breakpoints)
     eviction_policy: str = "ttl"  # "ttl" (timer with access-based refresh) or "lru" (reactive, evict only on pressure)
+    deduplication: str = "per_session"  # "per_session" (monolithic objects) or "chunk" (LMCache-style chunk dedup)
+    tier_migration: str = "ttl_push"  # "ttl_push" (scheduled demotion) or "demand_pull" (promote on hit)
     sharing: SharingConfig = field(default_factory=SharingConfig)
+
+    def validate(self) -> None:
+        if self.deduplication == "chunk" and self.block_size_tokens <= 0:
+            raise ValueError(
+                f"deduplication='chunk' requires block_size_tokens > 0, got {self.block_size_tokens}"
+            )
+        if self.tier_migration == "demand_pull" and self.eviction_policy != "lru":
+            raise ValueError(
+                f"tier_migration='demand_pull' requires eviction_policy='lru', got '{self.eviction_policy}'"
+            )
 
 
 @dataclass
