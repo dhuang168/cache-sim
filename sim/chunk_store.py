@@ -6,6 +6,7 @@ Identical chunks across sessions share storage via ref counting.
 """
 from __future__ import annotations
 import math
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -30,7 +31,13 @@ class ChunkObject:
 
 
 class ChunkTierStore:
-    """Manages ChunkObjects within a single storage tier with hash-based dedup."""
+    """Manages ChunkObjects within a single storage tier with hash-based dedup.
+
+    Uses two-bucket LRU for O(1) eviction candidate selection:
+    - _single_ref: chunks with ref_count == 1 (evicted first)
+    - _multi_ref: chunks with ref_count > 1 (evicted only when singles exhausted)
+    Both buckets are OrderedDicts maintaining insertion/access order (LRU).
+    """
 
     def __init__(self, name: str, capacity_bytes: int, block_size_bytes: int):
         self.name = name
@@ -38,6 +45,11 @@ class ChunkTierStore:
         self.block_size_bytes = block_size_bytes
         self.chunks: dict[str, ChunkObject] = {}
         self.used_bytes: int = 0
+        # Two-bucket LRU: single-ref evicted first, multi-ref evicted second
+        self._single_ref: OrderedDict[str, None] = OrderedDict()
+        self._multi_ref: OrderedDict[str, None] = OrderedDict()
+        # Precomputed alloc size for uniform chunks (set by engine)
+        self._uniform_alloc: int = 0
 
     @property
     def objects(self) -> dict[str, ChunkObject]:
@@ -51,6 +63,8 @@ class ChunkTierStore:
         return self.used_bytes / self.capacity_bytes
 
     def can_fit(self, size_bytes: int) -> bool:
+        if self._uniform_alloc > 0:
+            return self.used_bytes + self._uniform_alloc <= self.capacity_bytes
         n_blocks = allocated_blocks(size_bytes, self.block_size_bytes)
         return self.used_bytes + n_blocks * self.block_size_bytes <= self.capacity_bytes
 
@@ -65,17 +79,29 @@ class ChunkTierStore:
         if existing:
             existing.ref_count += 1
             existing.last_accessed_at_us = max(existing.last_accessed_at_us, chunk.last_accessed_at_us)
+            # Move from single to multi bucket
+            if existing.ref_count == 2 and chunk_hash in self._single_ref:
+                del self._single_ref[chunk_hash]
+                self._multi_ref[chunk_hash] = None
+            # Touch in current bucket (move to end = most recent)
+            elif chunk_hash in self._multi_ref:
+                self._multi_ref.move_to_end(chunk_hash)
             return False  # dedup hit
-        alloc = chunk.block_count * self.block_size_bytes
+        alloc = self._uniform_alloc if self._uniform_alloc > 0 else chunk.block_count * self.block_size_bytes
         self.chunks[chunk_hash] = chunk
         self.used_bytes += alloc
+        # New chunk always starts in single-ref bucket
+        self._single_ref[chunk_hash] = None
         return True  # novel
 
     def remove(self, chunk_hash: str) -> Optional[ChunkObject]:
         """Remove chunk regardless of ref_count. Returns the removed chunk."""
         chunk = self.chunks.pop(chunk_hash, None)
         if chunk is not None:
-            self.used_bytes -= chunk.block_count * self.block_size_bytes
+            alloc = self._uniform_alloc if self._uniform_alloc > 0 else chunk.block_count * self.block_size_bytes
+            self.used_bytes -= alloc
+            self._single_ref.pop(chunk_hash, None)
+            self._multi_ref.pop(chunk_hash, None)
         return chunk
 
     def deref(self, chunk_hash: str) -> bool:
@@ -85,27 +111,44 @@ class ChunkTierStore:
             return False
         chunk.ref_count -= 1
         if chunk.ref_count <= 0:
-            self.used_bytes -= chunk.block_count * self.block_size_bytes
+            alloc = self._uniform_alloc if self._uniform_alloc > 0 else chunk.block_count * self.block_size_bytes
+            self.used_bytes -= alloc
             del self.chunks[chunk_hash]
+            self._single_ref.pop(chunk_hash, None)
+            self._multi_ref.pop(chunk_hash, None)
             return True
+        elif chunk.ref_count == 1 and chunk_hash in self._multi_ref:
+            # Demote from multi to single bucket
+            del self._multi_ref[chunk_hash]
+            self._single_ref[chunk_hash] = None
         return False
 
     def evict_lru(self, n_bytes_needed: int) -> list[str]:
-        """Evict chunks by LRU, preferring ref_count=1. Returns evicted hashes."""
-        candidates = sorted(
-            self.chunks.items(),
-            key=lambda kv: (kv[1].ref_count > 1, kv[1].last_accessed_at_us),
-        )
+        """Evict chunks by LRU using two-bucket strategy. O(k) where k = chunks evicted."""
         evicted = []
         freed = 0
-        for chunk_hash, chunk in candidates:
-            if freed >= n_bytes_needed:
-                break
-            alloc = chunk.block_count * self.block_size_bytes
-            del self.chunks[chunk_hash]
-            self.used_bytes -= alloc
-            freed += alloc
-            evicted.append(chunk_hash)
+        alloc = self._uniform_alloc
+
+        # Phase 1: evict from single-ref bucket (LRU order = front of OrderedDict)
+        while freed < n_bytes_needed and self._single_ref:
+            chunk_hash, _ = self._single_ref.popitem(last=False)  # oldest first
+            chunk = self.chunks.pop(chunk_hash, None)
+            if chunk:
+                a = alloc if alloc > 0 else chunk.block_count * self.block_size_bytes
+                self.used_bytes -= a
+                freed += a
+                evicted.append(chunk_hash)
+
+        # Phase 2: if not enough, evict from multi-ref bucket
+        while freed < n_bytes_needed and self._multi_ref:
+            chunk_hash, _ = self._multi_ref.popitem(last=False)
+            chunk = self.chunks.pop(chunk_hash, None)
+            if chunk:
+                a = alloc if alloc > 0 else chunk.block_count * self.block_size_bytes
+                self.used_bytes -= a
+                freed += a
+                evicted.append(chunk_hash)
+
         return evicted
 
     def fragmentation_bytes(self) -> int:
@@ -129,7 +172,7 @@ class ChunkIndex:
     """Tracks which chunk hashes are cached per session for fast consecutive lookup."""
 
     def __init__(self):
-        # session_id -> list of (chunk_index, chunk_hash) sorted by index
+        # session_id -> dict of chunk_index -> chunk_hash
         self._session_chunks: dict[str, dict[int, str]] = {}
 
     def register_chunks(self, session_id: str, chunk_hashes: list[tuple[int, str]]) -> None:
@@ -137,8 +180,9 @@ class ChunkIndex:
         chunk_hashes: list of (chunk_index, chunk_hash)."""
         if session_id not in self._session_chunks:
             self._session_chunks[session_id] = {}
+        mapping = self._session_chunks[session_id]
         for idx, h in chunk_hashes:
-            self._session_chunks[session_id][idx] = h
+            mapping[idx] = h
 
     def lookup_consecutive(
         self, session_id: str, total_chunks: int,
@@ -147,7 +191,9 @@ class ChunkIndex:
         """Count consecutive cached chunks from position 0.
         Checks each store in order (L1, L2, L3A).
         Returns (cached_chunk_count, tier_of_last_cached_chunk)."""
-        session_map = self._session_chunks.get(session_id, {})
+        session_map = self._session_chunks.get(session_id)
+        if not session_map:
+            return 0, None
         cached = 0
         last_tier = None
         for i in range(total_chunks):
@@ -157,10 +203,11 @@ class ChunkIndex:
             # Find which store has this chunk
             found = False
             for store in stores:
-                obj = store.get(chunk_hash)
+                if store is None:
+                    continue
+                obj = store.chunks.get(chunk_hash)  # direct dict access, skip method call
                 if obj:
                     last_tier = obj.tier
-                    obj.last_accessed_at_us = max(obj.last_accessed_at_us, obj.last_accessed_at_us)
                     found = True
                     break
             if not found:

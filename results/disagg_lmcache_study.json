@@ -1,0 +1,560 @@
+[
+  {
+    "label": "Legacy 4W global",
+    "completed": 7201,
+    "throughput": 13.3,
+    "hit_rate": {
+      "L1": 0.07193,
+      "L2": 0.01097,
+      "L3A": 0.9142,
+      "miss": 0.002916
+    },
+    "combined_hit": 0.9971,
+    "recompute_mean": 0.2375,
+    "recompute_p95": 0.4437,
+    "ttft_mean_ms": 13685,
+    "ttft_p50_ms": 11034,
+    "ttft_p95_ms": 37626,
+    "prefill_mean_ms": 13685,
+    "prefill_p95_ms": 37626,
+    "qw_mean_ms": 0,
+    "qw_p95_ms": 0,
+    "slot_util_pct": 18.1,
+    "tier_sat": {
+      "L1": 13.04,
+      "L2": 31.8,
+      "L3A": 72.2
+    },
+    "kv_xfer_mean_ms": null,
+    "kv_xfer_p95_ms": null,
+    "dedup_ratio": null,
+    "promotions": 0
+  },
+  {
+    "label": "Disagg 3P:1D global",
+    "completed": 7201,
+    "throughput": 13.3,
+    "hit_rate": {
+      "L1": 0.06971,
+      "L2": 0.01097,
+      "L3A": 0.9164,
+      "miss": 0.002916
+    },
+    "combined_hit": 0.9971,
+    "recompute_mean": 0.2375,
+    "recompute_p95": 0.4437,
+    "ttft_mean_ms": 12219,
+    "ttft_p50_ms": 9765,
+    "ttft_p95_ms": 33661,
+    "prefill_mean_ms": 12219,
+    "prefill_p95_ms": 33661,
+    "qw_mean_ms": 0,
+    "qw_p95_ms": 0,
+    "slot_util_pct": 21.6,
+    "tier_sat": {
+      "L1": 15.82,
+      "L2": 40.12,
+      "L3A": 75.73
+    },
+    "kv_xfer_mean_ms": 704,
+    "kv_xfer_p95_ms": 1667,
+    "dedup_ratio": null,
+    "promotions": 0
+  },
+  {
+    "label": "Disagg+LMC 3P:1D global",
+    "completed": 7201,
+    "throughput": 13.3,
+    "hit_rate": {
+      "L1": 0.7032,
+      "L2": 0.0,
+      "L3A": 0.0,
+      "miss": 0.2968
+    },
+    "combined_hit": 0.7032,
+    "recompute_mean": 0.7302,
+    "recompute_p95": 1.0,
+    "ttft_mean_ms": 58678,
+    "ttft_p50_ms": 47506,
+    "ttft_p95_ms": 153954,
+    "prefill_mean_ms": 46990,
+    "prefill_p95_ms": 150827,
+    "qw_mean_ms": 17712,
+    "qw_p95_ms": 89316,
+    "slot_util_pct": 67.8,
+    "tier_sat": {
+      "L1": 65.69,
+      "L2": 64.54,
+      "L3A": 26.86
+    },
+    "kv_xfer_mean_ms": 540,
+    "kv_xfer_p95_ms": 1221,
+    "dedup_ratio": 0.5448,
+    "promotions": 379954
+  },
+  {
+    "label": "Legacy 4W local",
+    "completed": 7201,
+    "throughput": 13.3,
+    "hit_rate": {
+      "L1": 0.06499,
+      "L2": 0.009582,
+      "L3A": 0.9225,
+      "miss": 0.002916
+    },
+    "combined_hit": 0.9971,
+    "recompute_mean": 0.2375,
+    "recompute_p95": 0.4437,
+    "ttft_mean_ms": 13343,
+    "ttft_p50_ms": 10676,
+    "ttft_p95_ms": 37142,
+    "prefill_mean_ms": 13343,
+    "prefill_p95_ms": 37142,
+    "qw_mean_ms": 0,
+    "qw_p95_ms": 0,
+    "slot_util_pct": 17.8,
+    "tier_sat": {
+      "L1": 12.75,
+      "L2": 31.82,
+      "L3A": 26.18
+    },
+    "kv_xfer_mean_ms": null,
+    "kv_xfer_p95_ms": null,
+    "dedup_ratio": null,
+    "promotions": 0
+  },
+  {
+    "label": "Disagg 3P:1D local",
+    "completed": 7201,
+    "throughput": 13.3,
+    "hit_rate": {
+      "L1": 0.06221,
+      "L2": 0.01139,
+      "L3A": 0.9235,
+      "miss": 0.002916
+    },
+    "combined_hit": 0.9971,
+    "recompute_mean": 0.2375,
+    "recompute_p95": 0.4437,
+    "ttft_mean_ms": 11487,
+    "ttft_p50_ms": 9153,
+    "ttft_p95_ms": 32206,
+    "prefill_mean_ms": 11487,
+    "prefill_p95_ms": 32206,
+    "qw_mean_ms": 0,
+    "qw_p95_ms": 0,
+    "slot_util_pct": 20.5,
+    "tier_sat": {
+      "L1": 14.73,
+      "L2": 39.62,
+      "L3A": 32.25
+    },
+    "kv_xfer_mean_ms": 704,
+    "kv_xfer_p95_ms": 1667,
+    "dedup_ratio": null,
+    "promotions": 0
+  },
+  {
+    "label": "Disagg+LMC 3P:1D local",
+    "completed": 7201,
+    "throughput": 13.3,
+    "hit_rate": {
+      "L1": 0.6935,
+      "L2": 0.0,
+      "L3A": 0.0,
+      "miss": 0.3065
+    },
+    "combined_hit": 0.6935,
+    "recompute_mean": 0.7691,
+    "recompute_p95": 1.0,
+    "ttft_mean_ms": 62400,
+    "ttft_p50_ms": 49269,
+    "ttft_p95_ms": 168215,
+    "prefill_mean_ms": 51049,
+    "prefill_p95_ms": 161672,
+    "qw_mean_ms": 19171,
+    "qw_p95_ms": 101031,
+    "slot_util_pct": 68.2,
+    "tier_sat": {
+      "L1": 66.11,
+      "L2": 64.05,
+      "L3A": 38.86
+    },
+    "kv_xfer_mean_ms": 534,
+    "kv_xfer_p95_ms": 1174,
+    "dedup_ratio": 0.5237,
+    "promotions": 215830
+  },
+  {
+    "label": "Legacy 8W global",
+    "completed": 12215,
+    "throughput": 22.6,
+    "hit_rate": {
+      "L1": 0.04003,
+      "L2": 0.007859,
+      "L3A": 0.9482,
+      "miss": 0.00393
+    },
+    "combined_hit": 0.9961,
+    "recompute_mean": 0.2434,
+    "recompute_p95": 0.4541,
+    "ttft_mean_ms": 13047,
+    "ttft_p50_ms": 10494,
+    "ttft_p95_ms": 36527,
+    "prefill_mean_ms": 13047,
+    "prefill_p95_ms": 36527,
+    "qw_mean_ms": 0,
+    "qw_p95_ms": 0,
+    "slot_util_pct": 14.7,
+    "tier_sat": {
+      "L1": 10.53,
+      "L2": 20.54,
+      "L3A": 69.74
+    },
+    "kv_xfer_mean_ms": null,
+    "kv_xfer_p95_ms": null,
+    "dedup_ratio": null,
+    "promotions": 0
+  },
+  {
+    "label": "Disagg 7P:1D global",
+    "completed": 12215,
+    "throughput": 22.6,
+    "hit_rate": {
+      "L1": 0.0429,
+      "L2": 0.006713,
+      "L3A": 0.9465,
+      "miss": 0.00393
+    },
+    "combined_hit": 0.9961,
+    "recompute_mean": 0.2434,
+    "recompute_p95": 0.4541,
+    "ttft_mean_ms": 11209,
+    "ttft_p50_ms": 9026,
+    "ttft_p95_ms": 31430,
+    "prefill_mean_ms": 11209,
+    "prefill_p95_ms": 31430,
+    "qw_mean_ms": 0,
+    "qw_p95_ms": 0,
+    "slot_util_pct": 14.4,
+    "tier_sat": {
+      "L1": 10.62,
+      "L2": 21.94,
+      "L3A": 72.35
+    },
+    "kv_xfer_mean_ms": 677,
+    "kv_xfer_p95_ms": 1630,
+    "dedup_ratio": null,
+    "promotions": 0
+  },
+  {
+    "label": "Disagg+LMC 7P:1D global",
+    "completed": 12215,
+    "throughput": 22.6,
+    "hit_rate": {
+      "L1": 0.7489,
+      "L2": 0.0,
+      "L3A": 0.0,
+      "miss": 0.2511
+    },
+    "combined_hit": 0.7489,
+    "recompute_mean": 0.6955,
+    "recompute_p95": 1.0,
+    "ttft_mean_ms": 47690,
+    "ttft_p50_ms": 35296,
+    "ttft_p95_ms": 144266,
+    "prefill_mean_ms": 44885,
+    "prefill_p95_ms": 144266,
+    "qw_mean_ms": 5850,
+    "qw_p95_ms": 38845,
+    "slot_util_pct": 57.5,
+    "tier_sat": {
+      "L1": 55.48,
+      "L2": 52.6,
+      "L3A": 24.82
+    },
+    "kv_xfer_mean_ms": 532,
+    "kv_xfer_p95_ms": 1229,
+    "dedup_ratio": 0.5253,
+    "promotions": 689976
+  },
+  {
+    "label": "Legacy 8W local",
+    "completed": 12215,
+    "throughput": 22.6,
+    "hit_rate": {
+      "L1": 0.04314,
+      "L2": 0.00745,
+      "L3A": 0.9455,
+      "miss": 0.00393
+    },
+    "combined_hit": 0.9961,
+    "recompute_mean": 0.2434,
+    "recompute_p95": 0.4541,
+    "ttft_mean_ms": 12951,
+    "ttft_p50_ms": 10338,
+    "ttft_p95_ms": 36467,
+    "prefill_mean_ms": 12951,
+    "prefill_p95_ms": 36467,
+    "qw_mean_ms": 0,
+    "qw_p95_ms": 0,
+    "slot_util_pct": 14.6,
+    "tier_sat": {
+      "L1": 10.71,
+      "L2": 20.51,
+      "L3A": 17.82
+    },
+    "kv_xfer_mean_ms": null,
+    "kv_xfer_p95_ms": null,
+    "dedup_ratio": null,
+    "promotions": 0
+  },
+  {
+    "label": "Disagg 7P:1D local",
+    "completed": 12215,
+    "throughput": 22.6,
+    "hit_rate": {
+      "L1": 0.07041,
+      "L2": 0.006467,
+      "L3A": 0.9192,
+      "miss": 0.00393
+    },
+    "combined_hit": 0.9961,
+    "recompute_mean": 0.2434,
+    "recompute_p95": 0.4541,
+    "ttft_mean_ms": 11089,
+    "ttft_p50_ms": 8835,
+    "ttft_p95_ms": 31382,
+    "prefill_mean_ms": 11089,
+    "prefill_p95_ms": 31382,
+    "qw_mean_ms": 0,
+    "qw_p95_ms": 0,
+    "slot_util_pct": 14.3,
+    "tier_sat": {
+      "L1": 10.77,
+      "L2": 21.78,
+      "L3A": 18.17
+    },
+    "kv_xfer_mean_ms": 677,
+    "kv_xfer_p95_ms": 1630,
+    "dedup_ratio": null,
+    "promotions": 0
+  },
+  {
+    "label": "Disagg+LMC 7P:1D local",
+    "completed": 12215,
+    "throughput": 22.6,
+    "hit_rate": {
+      "L1": 0.7382,
+      "L2": 0.0,
+      "L3A": 0.0,
+      "miss": 0.2618
+    },
+    "combined_hit": 0.7382,
+    "recompute_mean": 0.7641,
+    "recompute_p95": 1.0,
+    "ttft_mean_ms": 54496,
+    "ttft_p50_ms": 41685,
+    "ttft_p95_ms": 156473,
+    "prefill_mean_ms": 49999,
+    "prefill_p95_ms": 156473,
+    "qw_mean_ms": 9485,
+    "qw_p95_ms": 58634,
+    "slot_util_pct": 59.5,
+    "tier_sat": {
+      "L1": 56.84,
+      "L2": 53.43,
+      "L3A": 38.3
+    },
+    "kv_xfer_mean_ms": 503,
+    "kv_xfer_p95_ms": 1137,
+    "dedup_ratio": 0.4665,
+    "promotions": 236758
+  },
+  {
+    "label": "Legacy 12W global",
+    "completed": 19010,
+    "throughput": 35.2,
+    "hit_rate": {
+      "L1": 0.06518,
+      "L2": 0.006523,
+      "L3A": 0.9261,
+      "miss": 0.002157
+    },
+    "combined_hit": 0.9978,
+    "recompute_mean": 0.2429,
+    "recompute_p95": 0.464,
+    "ttft_mean_ms": 13022,
+    "ttft_p50_ms": 10434,
+    "ttft_p95_ms": 36834,
+    "prefill_mean_ms": 13022,
+    "prefill_p95_ms": 36834,
+    "qw_mean_ms": 0,
+    "qw_p95_ms": 0,
+    "slot_util_pct": 15.4,
+    "tier_sat": {
+      "L1": 10.26,
+      "L2": 18.96,
+      "L3A": 70.24
+    },
+    "kv_xfer_mean_ms": null,
+    "kv_xfer_p95_ms": null,
+    "dedup_ratio": null,
+    "promotions": 0
+  },
+  {
+    "label": "Disagg 11P:1D global",
+    "completed": 19010,
+    "throughput": 35.2,
+    "hit_rate": {
+      "L1": 0.05313,
+      "L2": 0.006575,
+      "L3A": 0.9381,
+      "miss": 0.002157
+    },
+    "combined_hit": 0.9978,
+    "recompute_mean": 0.2429,
+    "recompute_p95": 0.464,
+    "ttft_mean_ms": 11198,
+    "ttft_p50_ms": 8931,
+    "ttft_p95_ms": 31824,
+    "prefill_mean_ms": 11198,
+    "prefill_p95_ms": 31824,
+    "qw_mean_ms": 0,
+    "qw_p95_ms": 0,
+    "slot_util_pct": 14.5,
+    "tier_sat": {
+      "L1": 10.15,
+      "L2": 18.08,
+      "L3A": 72.14
+    },
+    "kv_xfer_mean_ms": 679,
+    "kv_xfer_p95_ms": 1647,
+    "dedup_ratio": null,
+    "promotions": 0
+  },
+  {
+    "label": "Disagg+LMC 11P:1D global",
+    "completed": 19010,
+    "throughput": 35.2,
+    "hit_rate": {
+      "L1": 0.608,
+      "L2": 0.0,
+      "L3A": 0.0,
+      "miss": 0.392
+    },
+    "combined_hit": 0.608,
+    "recompute_mean": 0.7441,
+    "recompute_p95": 1.0,
+    "ttft_mean_ms": 48274,
+    "ttft_p50_ms": 36108,
+    "ttft_p95_ms": 146989,
+    "prefill_mean_ms": 45572,
+    "prefill_p95_ms": 146989,
+    "qw_mean_ms": 5549,
+    "qw_p95_ms": 36869,
+    "slot_util_pct": 57.9,
+    "tier_sat": {
+      "L1": 55.63,
+      "L2": 52.55,
+      "L3A": 28.29
+    },
+    "kv_xfer_mean_ms": 536,
+    "kv_xfer_p95_ms": 1237,
+    "dedup_ratio": 0.5428,
+    "promotions": 816961
+  },
+  {
+    "label": "Legacy 12W local",
+    "completed": 19010,
+    "throughput": 35.2,
+    "hit_rate": {
+      "L1": 0.06244,
+      "L2": 0.008101,
+      "L3A": 0.9273,
+      "miss": 0.002157
+    },
+    "combined_hit": 0.9978,
+    "recompute_mean": 0.2429,
+    "recompute_p95": 0.464,
+    "ttft_mean_ms": 12933,
+    "ttft_p50_ms": 10318,
+    "ttft_p95_ms": 36684,
+    "prefill_mean_ms": 12933,
+    "prefill_p95_ms": 36684,
+    "qw_mean_ms": 0,
+    "qw_p95_ms": 0,
+    "slot_util_pct": 15.3,
+    "tier_sat": {
+      "L1": 10.09,
+      "L2": 18.96,
+      "L3A": 16.36
+    },
+    "kv_xfer_mean_ms": null,
+    "kv_xfer_p95_ms": null,
+    "dedup_ratio": null,
+    "promotions": 0
+  },
+  {
+    "label": "Disagg 11P:1D local",
+    "completed": 19010,
+    "throughput": 35.2,
+    "hit_rate": {
+      "L1": 0.04829,
+      "L2": 0.005629,
+      "L3A": 0.9439,
+      "miss": 0.002157
+    },
+    "combined_hit": 0.9978,
+    "recompute_mean": 0.2429,
+    "recompute_p95": 0.464,
+    "ttft_mean_ms": 11141,
+    "ttft_p50_ms": 8856,
+    "ttft_p95_ms": 31773,
+    "prefill_mean_ms": 11141,
+    "prefill_p95_ms": 31773,
+    "qw_mean_ms": 0,
+    "qw_p95_ms": 0,
+    "slot_util_pct": 14.4,
+    "tier_sat": {
+      "L1": 9.777,
+      "L2": 18.03,
+      "L3A": 16.14
+    },
+    "kv_xfer_mean_ms": 679,
+    "kv_xfer_p95_ms": 1647,
+    "dedup_ratio": null,
+    "promotions": 0
+  },
+  {
+    "label": "Disagg+LMC 11P:1D local",
+    "completed": 19010,
+    "throughput": 35.2,
+    "hit_rate": {
+      "L1": 0.7248,
+      "L2": 0.0,
+      "L3A": 0.0,
+      "miss": 0.2752
+    },
+    "combined_hit": 0.7248,
+    "recompute_mean": 0.7823,
+    "recompute_p95": 1.0,
+    "ttft_mean_ms": 57563,
+    "ttft_p50_ms": 43918,
+    "ttft_p95_ms": 163774,
+    "prefill_mean_ms": 52351,
+    "prefill_p95_ms": 163761,
+    "qw_mean_ms": 10643,
+    "qw_p95_ms": 63754,
+    "slot_util_pct": 60.3,
+    "tier_sat": {
+      "L1": 57.21,
+      "L2": 52.87,
+      "L3A": 39.9
+    },
+    "kv_xfer_mean_ms": 500,
+    "kv_xfer_p95_ms": 1132,
+    "dedup_ratio": 0.4407,
+    "promotions": 236660
+  }
+]

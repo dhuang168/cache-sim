@@ -181,10 +181,35 @@ class SimEngine:
         if self._chunk_mode:
             block_tokens = config.cache.block_size_tokens
             self._chunk_size_bytes = kv_size_bytes(block_tokens, config.model)
+            # L2 shared per-worker, L3A shared globally (or per-worker in local mode)
+            worker_chunk_l2: dict[int, ChunkTierStore] = {}
+            for w in range(n_workers):
+                worker_chunk_l2[w] = ChunkTierStore(l2_cfg.name, l2_cfg.capacity_bytes, l2_cfg.block_size_bytes)
+            if self._l3a_shared:
+                global_chunk_l3a = ChunkTierStore(l3a_cfg.name, l3a_cfg.capacity_bytes * n_workers, l3a_cfg.block_size_bytes)
+                worker_chunk_l3a: dict[int, ChunkTierStore] = {}
+            else:
+                global_chunk_l3a = None
+                worker_chunk_l3a = {}
+                for w in range(n_workers):
+                    worker_chunk_l3a[w] = ChunkTierStore(l3a_cfg.name, l3a_cfg.capacity_bytes, l3a_cfg.block_size_bytes)
+
+            # Precompute block counts and alloc sizes for uniform chunks
+            self._chunk_l1_blocks = allocated_blocks(self._chunk_size_bytes, l1_cfg.block_size_bytes)
+            self._chunk_l2_blocks = allocated_blocks(self._chunk_size_bytes, l2_cfg.block_size_bytes)
+            self._chunk_l3a_blocks = allocated_blocks(self._chunk_size_bytes, l3a_cfg.block_size_bytes)
+            l1_alloc = self._chunk_l1_blocks * l1_cfg.block_size_bytes
+            l2_alloc = self._chunk_l2_blocks * l2_cfg.block_size_bytes
+            l3a_alloc = self._chunk_l3a_blocks * l3a_cfg.block_size_bytes
+
             for node in self.nodes:
+                wid = node.worker_id
                 l1_cs = ChunkTierStore(l1_cfg.name, l1_cfg.capacity_bytes, l1_cfg.block_size_bytes)
-                l2_cs = ChunkTierStore(l2_cfg.name, l2_cfg.capacity_bytes, l2_cfg.block_size_bytes)
-                l3a_cs = ChunkTierStore(l3a_cfg.name, l3a_cfg.capacity_bytes, l3a_cfg.block_size_bytes)
+                l1_cs._uniform_alloc = l1_alloc
+                l2_cs = worker_chunk_l2[wid]  # shared with other GPUs on same worker
+                l2_cs._uniform_alloc = l2_alloc
+                l3a_cs = global_chunk_l3a if self._l3a_shared else worker_chunk_l3a[wid]
+                l3a_cs._uniform_alloc = l3a_alloc
                 self._chunk_stores[node.node_id] = {
                     Tier.L1: l1_cs, Tier.L2: l2_cs, Tier.L3A: l3a_cs,
                 }
@@ -1044,7 +1069,9 @@ class SimEngine:
     def _place_kv_chunks(
         self, session_id: str, profile, total_tokens: int, node_id: int, collecting: bool,
     ) -> None:
-        """Chunk-mode KV write: split into chunks, dedup-insert, track metrics."""
+        """Chunk-mode KV write: split into chunks, dedup-insert, track metrics.
+
+        Optimized: batch dedup check first, then batch-evict + insert only novel chunks."""
         block_tokens = self.config.cache.block_size_tokens
         total_chunks = total_tokens // block_tokens if block_tokens > 0 else 0
         if total_chunks == 0:
@@ -1052,76 +1079,108 @@ class SimEngine:
         shared_chunks = profile.shared_system_prefix_tokens // block_tokens
         chunk_size = self._chunk_size_bytes
         stores = self._chunk_stores[node_id]
+        l1 = stores[Tier.L1]
+        now = self.sim_clock_us
+        prof_name = profile.name
+
+        # Precomputed block counts per tier (all chunks same size)
+        l1_blocks = self._chunk_l1_blocks
+        l2_blocks = self._chunk_l2_blocks
+        l3a_blocks = self._chunk_l3a_blocks
+
+        # Phase 1: Generate hashes and separate dedup hits from novel chunks
         registered = []
+        novel_hashes = []  # (chunk_index, hash) for chunks needing insertion
+        dedup_count = 0
 
         for i in range(total_chunks):
-            ch = chunk_hash_for(profile.name, session_id, i, shared_chunks)
-            chunk_obj = ChunkObject(
-                chunk_hash=ch,
-                tier=Tier.L1,
-                size_bytes=chunk_size,
-                block_count=allocated_blocks(chunk_size, stores[Tier.L1].block_size_bytes),
-                created_at_us=self.sim_clock_us,
-                last_accessed_at_us=self.sim_clock_us,
-                ref_count=1,
-                block_layout=TIER_TO_LAYOUT[Tier.L1],
-                chunk_index=i,
-                profile_name=profile.name,
-            )
+            if i < shared_chunks:
+                ch = f"chunk-{prof_name}-{i}"
+            else:
+                ch = f"chunk-{session_id}-{i}"
 
-            # Try L1
-            l1 = stores[Tier.L1]
-            if not l1.can_fit(chunk_size):
-                # Evict L1 chunks and cascade them to L2
-                evicted = l1.evict_lru(chunk_size)
+            existing = l1.chunks.get(ch)
+            if existing:
+                existing.ref_count += 1
+                existing.last_accessed_at_us = now
+                # Move to multi-ref bucket if crossing threshold
+                if existing.ref_count == 2 and ch in l1._single_ref:
+                    del l1._single_ref[ch]
+                    l1._multi_ref[ch] = None
+                elif ch in l1._multi_ref:
+                    l1._multi_ref.move_to_end(ch)
+                dedup_count += 1
+                registered.append((i, ch))
+                continue
+
+            # Check L2 and L3A for existing chunks (dedup across tiers)
+            found_lower = False
+            for tier_key in (Tier.L2, Tier.L3A):
+                lower = stores[tier_key]
+                ex_lower = lower.chunks.get(ch)
+                if ex_lower:
+                    ex_lower.ref_count += 1
+                    ex_lower.last_accessed_at_us = now
+                    if ex_lower.ref_count == 2 and ch in lower._single_ref:
+                        del lower._single_ref[ch]
+                        lower._multi_ref[ch] = None
+                    dedup_count += 1
+                    registered.append((i, ch))
+                    found_lower = True
+                    break
+            if not found_lower:
+                novel_hashes.append((i, ch))
+                registered.append((i, ch))
+
+        # Phase 2: Batch-insert novel chunks
+        if novel_hashes:
+            novel_total_bytes = len(novel_hashes) * (l1_blocks * l1.block_size_bytes)
+            # Pre-evict L1 if needed (single batch eviction)
+            free_space = l1.capacity_bytes - l1.used_bytes
+            if free_space < novel_total_bytes:
+                needed = novel_total_bytes - free_space
+                evicted = l1.evict_lru(needed)
                 self._cascade_evicted_chunks(evicted, Tier.L1, stores)
-            if l1.can_fit(chunk_size):
-                novel = l1.insert_or_ref(ch, chunk_obj)
-                if collecting:
-                    if novel:
-                        self.metrics.chunk_novel_inserts += 1
-                    else:
-                        self.metrics.chunk_dedup_hits += 1
-                    self.metrics.chunk_total_logical += 1
-                registered.append((i, ch))
-                continue
 
-            # Try L2
-            chunk_obj.tier = Tier.L2
-            chunk_obj.block_count = allocated_blocks(chunk_size, stores[Tier.L2].block_size_bytes)
-            chunk_obj.block_layout = TIER_TO_LAYOUT[Tier.L2]
-            l2 = stores[Tier.L2]
-            if not l2.can_fit(chunk_size):
-                evicted = l2.evict_lru(chunk_size)
-                self._cascade_evicted_chunks(evicted, Tier.L2, stores)
-            if l2.can_fit(chunk_size):
-                novel = l2.insert_or_ref(ch, chunk_obj)
-                if collecting:
-                    if novel:
-                        self.metrics.chunk_novel_inserts += 1
+            for i, ch in novel_hashes:
+                chunk_obj = ChunkObject(
+                    chunk_hash=ch, tier=Tier.L1, size_bytes=chunk_size,
+                    block_count=l1_blocks, created_at_us=now,
+                    last_accessed_at_us=now, ref_count=1,
+                    block_layout=TIER_TO_LAYOUT[Tier.L1],
+                    chunk_index=i, profile_name=prof_name,
+                )
+                if l1.used_bytes + l1._uniform_alloc <= l1.capacity_bytes:
+                    l1.chunks[ch] = chunk_obj
+                    l1.used_bytes += l1._uniform_alloc
+                    l1._single_ref[ch] = None
+                else:
+                    # L1 full even after batch eviction — try L2
+                    chunk_obj.tier = Tier.L2
+                    chunk_obj.block_count = l2_blocks
+                    chunk_obj.block_layout = TIER_TO_LAYOUT[Tier.L2]
+                    l2 = stores[Tier.L2]
+                    if not l2.can_fit(chunk_size):
+                        evicted_l2 = l2.evict_lru(chunk_size)
+                        self._cascade_evicted_chunks(evicted_l2, Tier.L2, stores)
+                    if l2.can_fit(chunk_size):
+                        l2.insert_or_ref(ch, chunk_obj)
                     else:
-                        self.metrics.chunk_dedup_hits += 1
-                    self.metrics.chunk_total_logical += 1
-                registered.append((i, ch))
-                continue
+                        # Try L3A
+                        chunk_obj.tier = Tier.L3A
+                        chunk_obj.block_count = l3a_blocks
+                        chunk_obj.block_layout = TIER_TO_LAYOUT[Tier.L3A]
+                        chunk_obj.is_hibernated = True
+                        l3a = stores[Tier.L3A]
+                        if not l3a.can_fit(chunk_size):
+                            l3a.evict_lru(chunk_size)
+                        if l3a.can_fit(chunk_size):
+                            l3a.insert_or_ref(ch, chunk_obj)
 
-            # Try L3A
-            chunk_obj.tier = Tier.L3A
-            chunk_obj.block_count = allocated_blocks(chunk_size, stores[Tier.L3A].block_size_bytes)
-            chunk_obj.block_layout = TIER_TO_LAYOUT[Tier.L3A]
-            chunk_obj.is_hibernated = True
-            l3a = stores[Tier.L3A]
-            if not l3a.can_fit(chunk_size):
-                l3a.evict_lru(chunk_size)  # L3A eviction = permanent loss
-            if l3a.can_fit(chunk_size):
-                novel = l3a.insert_or_ref(ch, chunk_obj)
-                if collecting:
-                    if novel:
-                        self.metrics.chunk_novel_inserts += 1
-                    else:
-                        self.metrics.chunk_dedup_hits += 1
-                    self.metrics.chunk_total_logical += 1
-                registered.append((i, ch))
+        if collecting:
+            self.metrics.chunk_dedup_hits += dedup_count
+            self.metrics.chunk_novel_inserts += len(novel_hashes)
+            self.metrics.chunk_total_logical += total_chunks
 
         self._chunk_index.register_chunks(session_id, registered)
 
@@ -1416,10 +1475,16 @@ class SimEngine:
                 if l1_cs:
                     agg_l1_used += l1_cs.used_bytes
                     agg_l1_cap += l1_cs.capacity_bytes
-            agg_l2_used = sum(cs.get(Tier.L2, ChunkTierStore("", 0, 1)).used_bytes
-                              for cs in self._chunk_stores.values())
-            agg_l2_cap = sum(cs.get(Tier.L2, ChunkTierStore("", 0, 1)).capacity_bytes
-                             for cs in self._chunk_stores.values())
+            # L2 is shared per-worker — deduplicate by using id()
+            seen_l2 = set()
+            agg_l2_used = 0
+            agg_l2_cap = 0
+            for cs in self._chunk_stores.values():
+                l2 = cs.get(Tier.L2)
+                if l2 and id(l2) not in seen_l2:
+                    seen_l2.add(id(l2))
+                    agg_l2_used += l2.used_bytes
+                    agg_l2_cap += l2.capacity_bytes
         else:
             # Object-mode: use TierStores
             agg_l1_used = 0
@@ -1444,10 +1509,16 @@ class SimEngine:
             (agg_l2_used / agg_l2_cap * 100.0) if agg_l2_cap > 0 else 0.0
         )
         if self._chunk_mode:
-            agg_l3a_used = sum(cs.get(Tier.L3A, ChunkTierStore("", 0, 1)).used_bytes
-                               for cs in self._chunk_stores.values())
-            agg_l3a_cap = sum(cs.get(Tier.L3A, ChunkTierStore("", 0, 1)).capacity_bytes
-                              for cs in self._chunk_stores.values())
+            # L3A is shared — deduplicate
+            seen_l3a = set()
+            agg_l3a_used = 0
+            agg_l3a_cap = 0
+            for cs in self._chunk_stores.values():
+                l3a = cs.get(Tier.L3A)
+                if l3a and id(l3a) not in seen_l3a:
+                    seen_l3a.add(id(l3a))
+                    agg_l3a_used += l3a.used_bytes
+                    agg_l3a_cap += l3a.capacity_bytes
             self.metrics.tier_occupancy_pct["L3A"].append(
                 (agg_l3a_used / agg_l3a_cap * 100.0) if agg_l3a_cap > 0 else 0.0
             )
