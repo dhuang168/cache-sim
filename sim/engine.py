@@ -14,10 +14,10 @@ from sim.cache import (
 )
 from sim.service import ServiceModel
 from sim.workload import WorkloadSynthesizer
-from sim.oracle import PrefillOracle, DecodeOracle, transfer_time_us, is_cache_worthwhile
+from sim.oracle import PrefillOracle, DecodeOracle, transfer_time_us, is_cache_worthwhile, kv_transfer_time_us
 from sim.eviction import EvictionEngine
 from sim.metrics import MetricsCollector
-from sim.node import PrefillNode
+from sim.node import PrefillNode, DecodeNode
 from sim.dispatch import PushDispatcher, SmartPushDispatcher, PullDispatcher
 
 
@@ -154,6 +154,23 @@ class SimEngine:
         # Backward-compat: single pending_prefills deque for N=1
         self._pending_prefills = self.nodes[0].pending_prefills
 
+        # Disaggregated P/D setup
+        self._disaggregated = config.service.disaggregated
+        self.decode_nodes: list[DecodeNode] = []
+        if self._disaggregated:
+            n_dec = config.service.n_decode_nodes
+            assert n_dec >= 1, (
+                f"disaggregated=true requires n_decode_nodes >= 1, got {n_dec}"
+            )
+            for i in range(n_dec):
+                dn = DecodeNode(
+                    node_id=i,
+                    worker_id=i,  # each decode node is independent
+                    decode_slots=config.service.n_decode_slots,
+                    decode_queue_max=config.service.decode_queue_max,
+                )
+                self.decode_nodes.append(dn)
+
         # Oracles
         table_path = _BENCHMARK_DIR / f"prefill_70b_a100.json"
         if not table_path.exists():
@@ -195,6 +212,7 @@ class SimEngine:
             EventType.SESSION_RESUME: self._on_session_resume,
             EventType.EPOCH_REPORT: self._on_epoch_report,
             EventType.NODE_PULL_CHECK: self._on_node_pull_check,
+            EventType.KV_TRANSFER_COMPLETE: self._on_kv_transfer_complete,
         }
 
     def schedule(self, event: Event) -> None:
@@ -585,6 +603,10 @@ class SimEngine:
                 self.metrics.savings_events["COLD_MISS"] += 1
             prefill_us = self.prefill_oracle.prefill_latency_us(max(1, uncached_tokens))
 
+        # Apply prefill latency multiplier for disaggregated mode
+        if self._disaggregated:
+            prefill_us = int(prefill_us * self.config.service.prefill_latency_multiplier)
+
         # Update cache object access time
         if hit_key:
             obj = self._find_cache_object(hit_key)
@@ -666,9 +688,6 @@ class SimEngine:
             warming_key = f"{hit_key}:w{node_id // self._gpus_per_worker}"
             self._l3a_warming_objects.discard(warming_key)
 
-        # FSM: PREFILLING -> DECODE_QUEUED
-        self._transition(request_id, RequestState.DECODE_QUEUED)
-
         # Record TTFT and prefill duration
         if collecting and request_id in self.request_arrival_us:
             ttft = self.sim_clock_us - self.request_arrival_us[request_id]
@@ -703,14 +722,40 @@ class SimEngine:
         else:
             self._push_drain_node(node, collecting)
 
-        # Try to move to decode
-        decode_event = self.service.complete_prefill(event, self.sim_clock_us)
-        if decode_event:
-            decode_event.payload = payload
-            self.schedule(decode_event)
+        if self._disaggregated:
+            # Disaggregated mode: schedule KV transfer to decode node
+            self._transition(request_id, RequestState.KV_TRANSFERRING)
+
+            total_ctx = payload.get("total_context", 0)
+            input_tokens = payload.get("input_tokens", 0)
+            total_tokens = total_ctx + input_tokens
+            kv_bytes = kv_size_bytes(total_tokens, self.config.model) if total_tokens > 0 else 0
+            svc = self.config.service
+            xfer_us = kv_transfer_time_us(
+                kv_bytes, svc.kv_transfer_bandwidth_bytes_per_s, svc.kv_transfer_latency_floor_us
+            )
+            payload["kv_transfer_bytes"] = kv_bytes
+            payload["kv_transfer_us"] = xfer_us
+
+            self.schedule(Event(
+                time_us=self.sim_clock_us + max(1, xfer_us), seq=0,
+                event_type=EventType.KV_TRANSFER_COMPLETE,
+                session_id=event.session_id,
+                request_id=request_id,
+                payload=payload,
+            ))
         else:
-            if collecting:
-                self.metrics.prefill_slot_blocked_us += 1
+            # Colocated mode: existing flow
+            self._transition(request_id, RequestState.DECODE_QUEUED)
+
+            # Try to move to decode
+            decode_event = self.service.complete_prefill(event, self.sim_clock_us)
+            if decode_event:
+                decode_event.payload = payload
+                self.schedule(decode_event)
+            else:
+                if collecting:
+                    self.metrics.prefill_slot_blocked_us += 1
 
     def _push_drain_node(self, node: PrefillNode, collecting: bool) -> None:
         """Drain pending prefills from a node's local queue (push mode)."""
@@ -764,6 +809,71 @@ class SimEngine:
         node = self._get_node(node_id)
         self._pull_drain_node(node, collecting)
 
+    # ─── KV Transfer (disaggregated mode) ───
+
+    def _on_kv_transfer_complete(self, event: Event, collecting: bool) -> None:
+        """KV cache has been transferred from prefill node to decode node."""
+        request_id = event.request_id
+        payload = event.payload or {}
+
+        # FSM: KV_TRANSFERRING -> DECODE_QUEUED
+        self._transition(request_id, RequestState.DECODE_QUEUED)
+
+        # Record transfer metrics
+        if collecting:
+            xfer_us = payload.get("kv_transfer_us", 0)
+            xfer_bytes = payload.get("kv_transfer_bytes", 0)
+            if xfer_us > 0:
+                self.metrics.kv_transfer_us.append(xfer_us)
+            if xfer_bytes > 0:
+                self.metrics.kv_transfer_bytes.append(xfer_bytes)
+
+        # Pick least-loaded decode node
+        best_dn = min(self.decode_nodes, key=lambda dn: dn.active_sequences)
+        payload["decode_node_id"] = best_dn.node_id
+
+        if best_dn.decode_slots_free > 0:
+            best_dn.decode_slots_free -= 1
+            best_dn.active_sequences += 1
+            if collecting:
+                self.metrics.decode_queue_wait_us.append(0)
+            self.schedule(Event(
+                time_us=self.sim_clock_us, seq=0,
+                event_type=EventType.DECODE_START,
+                session_id=event.session_id,
+                request_id=request_id,
+                payload=payload,
+            ))
+        elif len(best_dn.pending_decodes) < best_dn.decode_queue_max:
+            self._request_queued_at_us[request_id] = self.sim_clock_us
+            best_dn.pending_decodes.append(Event(
+                time_us=self.sim_clock_us, seq=0,
+                event_type=EventType.DECODE_START,
+                session_id=event.session_id,
+                request_id=request_id,
+                payload=payload,
+            ))
+        # Else: all decode nodes full — request dropped (backpressure)
+
+    def _disagg_drain_decode_node(self, dn: DecodeNode, collecting: bool) -> None:
+        """Drain pending decodes from a decode node's queue."""
+        while dn.pending_decodes and dn.decode_slots_free > 0:
+            queued_event = dn.pending_decodes.popleft()
+            dn.decode_slots_free -= 1
+            dn.active_sequences += 1
+            request_id = queued_event.request_id
+            if collecting:
+                queued_at = self._request_queued_at_us.pop(request_id, None)
+                if queued_at is not None:
+                    self.metrics.decode_queue_wait_us.append(self.sim_clock_us - queued_at)
+            self.schedule(Event(
+                time_us=self.sim_clock_us, seq=0,
+                event_type=EventType.DECODE_START,
+                session_id=queued_event.session_id,
+                request_id=request_id,
+                payload=queued_event.payload,
+            ))
+
     # ─── Decode ───
 
     def _on_decode_start(self, event: Event, collecting: bool) -> None:
@@ -772,7 +882,13 @@ class SimEngine:
 
         payload = event.payload or {}
         output_tokens = payload.get("output_tokens", 1)
-        active_seqs = self.service.active_decode_sequences
+
+        if self._disaggregated:
+            # Use per-decode-node active sequences for batch degradation
+            dn_id = payload.get("decode_node_id", 0)
+            active_seqs = self.decode_nodes[dn_id].active_sequences
+        else:
+            active_seqs = self.service.active_decode_sequences
 
         decode_us = self.decode_oracle.decode_latency_us(output_tokens, active_seqs)
 
@@ -850,10 +966,17 @@ class SimEngine:
         self._transition(request_id, RequestState.COMPLETE)
 
         # Free decode slot
-        next_decode = self.service.complete_decode(event, self.sim_clock_us)
-        if next_decode:
-            next_decode.payload = next_decode.payload or {}
-            self.schedule(next_decode)
+        if self._disaggregated:
+            dn_id = payload.get("decode_node_id", 0)
+            dn = self.decode_nodes[dn_id]
+            dn.decode_slots_free += 1
+            dn.active_sequences = max(0, dn.active_sequences - 1)
+            self._disagg_drain_decode_node(dn, collecting)
+        else:
+            next_decode = self.service.complete_decode(event, self.sim_clock_us)
+            if next_decode:
+                next_decode.payload = next_decode.payload or {}
+                self.schedule(next_decode)
 
         # Cleanup
         self.request_states.pop(request_id, None)
@@ -1057,7 +1180,13 @@ class SimEngine:
         if isinstance(self.dispatcher, PullDispatcher):
             total_pending += len(self.dispatcher.global_queue)
         self.metrics.prefill_queue_depth.append(total_pending)
-        self.metrics.decode_queue_depth.append(len(self.service.decode_queue))
+        if self._disaggregated:
+            total_decode_pending = sum(len(dn.pending_decodes) for dn in self.decode_nodes)
+            self.metrics.decode_queue_depth.append(total_decode_pending)
+            for dn in self.decode_nodes:
+                self.metrics.per_decode_node_active_seqs[dn.node_id].append(dn.active_sequences)
+        else:
+            self.metrics.decode_queue_depth.append(len(self.service.decode_queue))
 
         # Record memory pollution (aggregate by worker for L2/L3A, by node for L1)
         agg_l1_frag = sum(n.l1_store.fragmentation_bytes() for n in self.nodes)

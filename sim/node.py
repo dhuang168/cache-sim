@@ -3,6 +3,7 @@ import bisect
 from collections import deque
 
 from sim.cache import TierStore, Tier
+from sim.events import Event
 
 
 class PrefillNode:
@@ -62,3 +63,28 @@ class PrefillNode:
             self.active_completions.remove(completion_us)
         except ValueError:
             pass
+
+
+class DecodeNode:
+    """Lightweight decode node for disaggregated P/D mode.
+    Tracks decode slots and active sequences only — no cache stores."""
+
+    def __init__(
+        self,
+        node_id: int,
+        worker_id: int,
+        decode_slots: int,
+        decode_queue_max: int,
+    ):
+        self.node_id = node_id
+        self.worker_id = worker_id
+        self.decode_slots_total = decode_slots
+        self.decode_slots_free = decode_slots
+        self.decode_queue_max = decode_queue_max
+        self.pending_decodes: deque[Event] = deque()
+        self.active_sequences: int = 0
+
+    def queue_pressure(self) -> float:
+        if self.decode_queue_max <= 0:
+            return 1.0
+        return len(self.pending_decodes) / self.decode_queue_max

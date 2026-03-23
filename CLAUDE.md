@@ -27,7 +27,7 @@ This causes output issues. Run pytest without stderr redirection.
 ## Architecture Overview
 
 - **sim/engine.py** — Main event loop. `SimEngine.run()` is the entry point. Uses a min-heap for event scheduling with microsecond sim clock.
-- **sim/events.py** — Event types and request FSM. The FSM enforces legal state transitions (QUEUED -> CACHE_LOOKUP -> HIT/MISS -> PREFILLING -> DECODE_QUEUED -> DECODING -> KV_WRITE -> COMPLETE).
+- **sim/events.py** — Event types and request FSM. Colocated FSM: QUEUED -> CACHE_LOOKUP -> HIT/MISS -> PREFILLING -> DECODE_QUEUED -> DECODING -> KV_WRITE -> COMPLETE. Disaggregated FSM adds: PREFILLING -> KV_TRANSFERRING -> DECODE_QUEUED.
 - **sim/cache.py** — `CacheObject`, `TierStore` (per-tier storage manager), `PrefixTrie` (token hash-based prefix matching), `kv_size_bytes()` formula.
 - **sim/eviction.py** — `EvictionEngine` manages L1->L2->L3A movement. L1 eviction is watermark-based, L2->L3A is TTL-driven, L3A cleanup is LRU.
 - **sim/oracle.py** — `PrefillOracle` (piecewise-linear interpolation from A100 benchmark table), `DecodeOracle` (sqrt batch degradation model), `transfer_time_us()`, `is_cache_worthwhile()`.
@@ -111,6 +111,19 @@ These are **mandatory** — must all pass before any exploratory run. They test 
 12. `test_local_l3a_worker_isolation` — object on worker 0 NOT visible from worker 1
 13. `test_global_l3a_cross_worker_access` — global L3A visible from any node
 14. `test_session_migration_global_advantage` — tiny L1/L2 + 2 workers → global > local hit rate
+
+### Disaggregated P/D Tests (`tests/test_disaggregated.py`)
+10 tests for disaggregated prefill-decode separation:
+1. `test_backward_compat_disaggregated_false` — explicit disaggregated=false matches default
+2. `test_kv_transfer_events_fire` — 3P:1D produces KV transfers with positive latencies
+3. `test_prefill_not_blocked_by_decode` — prefill slots freed immediately, no decode backpressure
+4. `test_decode_node_utilization` — decode nodes have active sequences under load
+5. `test_kv_transfer_size_matches_model` — transfer bytes = kv_size_bytes(total_tokens)
+6. `test_kv_write_targets_prefill_node` — KV written to prefill node L1, not decode node
+7. `test_prefill_multiplier_effect` — multiplier=0.5 halves prefill duration
+8. `test_transfer_bandwidth_sensitivity` — low BW → higher transfer times
+9. `test_decode_backpressure` — 1 decode slot, heavy load → requests queue
+10. `test_disaggregated_perf_benchmark` — 10s sim completes in <10s wall-clock
 
 ## Debug History and Lessons Learned
 
@@ -221,6 +234,33 @@ Added for multi-node prefill dispatch (all have backward-compatible defaults):
 - Intra-worker L2 hit: no penalty (shared DRAM on same host)
 - Intra-worker L1 hit from another GPU: small NVLink penalty (`inter_node_latency_us` only)
 - Inter-worker hit: full `inter_node_latency_us` + bandwidth penalty
+
+## Disaggregated Prefill-Decode Mode
+
+When `service.disaggregated=true`, prefill and decode run on **separate GPU pools**:
+- **Prefill nodes** (`n_prefill_nodes`): Handle prefill only. Prefill slots freed immediately on completion — no backpressure from decode.
+- **Decode nodes** (`n_decode_nodes`): Handle decode only. Lightweight — no L1/L2/L3A cache stores. KV cache is written back to the originating prefill node after decode completes.
+- **KV transfer**: After prefill completes, KV data is transferred from prefill GPU to decode GPU via RDMA. This adds a `KV_TRANSFERRING` FSM state between PREFILLING and DECODE_QUEUED.
+
+**Disaggregated Config Fields (`ServiceConfig`)**
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `disaggregated` | `False` | Enable prefill-decode separation |
+| `n_decode_nodes` | `0` | Number of dedicated decode GPUs (0 = colocated mode) |
+| `kv_transfer_bandwidth_bytes_per_s` | `50_000_000_000` | 50 GB/s RDMA for P→D KV transfer |
+| `kv_transfer_latency_floor_us` | `2000` | 2ms fixed transfer overhead |
+| `prefill_latency_multiplier` | `1.0` | <1.0 = speedup from no decode interference |
+| `decode_batch_fill_factor` | `0.7` | Average decode batch utilization (higher in disaggregated) |
+
+**Disaggregated request flow:**
+```
+ARRIVAL → CACHE_LOOKUP → [HIT/MISS] → PREFILLING (prefill node)
+  → KV_TRANSFERRING (RDMA to decode node) → DECODE_QUEUED → DECODING (decode node)
+  → KV_WRITE (back to prefill node L1) → COMPLETE
+```
+
+**Reference config:** `configs/disaggregated.json` — 3:1 prefill:decode ratio (3 prefill GPUs, 1 decode GPU).
 
 ## Workload Profiles (v2)
 

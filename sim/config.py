@@ -55,6 +55,13 @@ class ServiceConfig:
     n_gpus_per_worker: int = 8  # GPUs sharing one host's DRAM (L2) and SSD (L3A)
     l3a_shared: bool = True
     l3a_remote_latency_us: int = 50_000  # 50ms for remote/global L3A access
+    # Disaggregated prefill-decode separation
+    disaggregated: bool = False
+    n_decode_nodes: int = 0  # 0 = legacy colocated decode pool
+    kv_transfer_bandwidth_bytes_per_s: int = 50_000_000_000  # 50 GB/s RDMA
+    kv_transfer_latency_floor_us: int = 2000  # 2ms fixed overhead
+    prefill_latency_multiplier: float = 1.0  # <1.0 = speedup from no decode interference
+    decode_batch_fill_factor: float = 0.7  # avg decode batch utilization
 
 
 @dataclass

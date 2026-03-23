@@ -90,6 +90,12 @@ class MetricsCollector:
     max_replication_factor: list[int] = field(default_factory=list)  # most-replicated object per epoch
     shared_prefix_worker_distribution: dict[str, int] = field(default_factory=dict)  # cache_key → n_workers having a copy
 
+    # Disaggregated P/D metrics
+    kv_transfer_us: list[int] = field(default_factory=list)
+    kv_transfer_bytes: list[int] = field(default_factory=list)
+    per_decode_node_active_seqs: dict[int, list[int]] = field(default_factory=lambda: defaultdict(list))
+    decode_queue_wait_us: list[int] = field(default_factory=list)
+
     # Global L3A bandwidth contention
     l3a_concurrent_reads: list[int] = field(default_factory=list)  # concurrent L3A reads per epoch
     l3a_bandwidth_contention_events: int = 0  # times contention factor > 1
@@ -229,5 +235,21 @@ class MetricsCollector:
 
         if self.affinity_dispatches + self.non_affinity_dispatches > 0:
             result["dispatch_stats"] = dispatch_stats
+
+        # Disaggregated P/D stats
+        if self.kv_transfer_us:
+            kv_xfer = {}
+            for p in [50, 95, 99]:
+                kv_xfer[f"p{p}"] = r(float(np.percentile(self.kv_transfer_us, p)) / 1000.0)
+            kv_xfer["mean"] = r(float(np.mean(self.kv_transfer_us)) / 1000.0)
+            result["kv_transfer_ms"] = kv_xfer
+            if self.kv_transfer_bytes:
+                result["kv_transfer_mean_mb"] = r(float(np.mean(self.kv_transfer_bytes)) / 1e6)
+        if self.decode_queue_wait_us:
+            dq = {}
+            for p in [50, 95, 99]:
+                dq[f"p{p}"] = r(float(np.percentile(self.decode_queue_wait_us, p)) / 1000.0)
+            dq["mean"] = r(float(np.mean(self.decode_queue_wait_us)) / 1000.0)
+            result["decode_queue_wait_ms"] = dq
 
         return result

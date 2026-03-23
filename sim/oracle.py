@@ -51,6 +51,11 @@ def transfer_time_us(size_bytes: int, tier: TierConfig) -> int:
     return int(tier.latency_floor_us + (size_bytes / tier.bandwidth_bytes_per_s) * 1_000_000)
 
 
+def kv_transfer_time_us(kv_bytes: int, bandwidth_bps: int, latency_floor_us: int) -> int:
+    """Time to transfer KV cache from prefill node to decode node (e.g., via RDMA)."""
+    return latency_floor_us + int((kv_bytes / bandwidth_bps) * 1_000_000)
+
+
 def is_cache_worthwhile(
     kv_bytes: int,
     tier: TierConfig,

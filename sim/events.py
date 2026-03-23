@@ -15,6 +15,7 @@ class EventType(Enum):
     SESSION_RESUME = auto()
     EPOCH_REPORT = auto()
     NODE_PULL_CHECK = auto()
+    KV_TRANSFER_COMPLETE = auto()
 
 
 class RequestState(Enum):
@@ -29,6 +30,7 @@ class RequestState(Enum):
     DECODING = auto()
     KV_WRITE = auto()
     COMPLETE = auto()
+    KV_TRANSFERRING = auto()
 
 
 # Valid FSM transitions
@@ -44,7 +46,8 @@ _VALID_TRANSITIONS: dict[RequestState, set[RequestState]] = {
     RequestState.HIT_L2: {RequestState.PREFILLING},
     RequestState.HIT_L3A: {RequestState.PREFILLING},
     RequestState.MISS: {RequestState.PREFILLING},
-    RequestState.PREFILLING: {RequestState.DECODE_QUEUED},
+    RequestState.PREFILLING: {RequestState.DECODE_QUEUED, RequestState.KV_TRANSFERRING},
+    RequestState.KV_TRANSFERRING: {RequestState.DECODE_QUEUED},
     RequestState.DECODE_QUEUED: {RequestState.DECODING},
     RequestState.DECODING: {RequestState.KV_WRITE},
     RequestState.KV_WRITE: {RequestState.COMPLETE},
