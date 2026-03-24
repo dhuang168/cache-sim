@@ -27,6 +27,7 @@ import json
 import math
 import os
 
+import numpy as np
 from agentsim.core.contracts import ConfidenceLabel, CacheOracleBase
 
 
@@ -262,3 +263,53 @@ class OracleFactory:
 
         # No table — fall back to roofline with ANALYTICAL_ONLY label
         return RooflineOracle(chip, model)
+
+
+# ---------------------------------------------------------------------------
+# Simple oracles ported from sim/oracle.py (backward-compatible interface)
+# These are used by the ported engine for direct compatibility.
+# ---------------------------------------------------------------------------
+
+class SimplePrefillOracle:
+    """Piecewise-linear prefill oracle using numpy interp (from sim/oracle.py)."""
+
+    def __init__(self, table_path: str):
+        with open(table_path) as f:
+            data = json.load(f)
+        self._tokens = np.array(data["tokens"], dtype=float)
+        self._latency_us = np.array(data["latency_us"], dtype=float)
+        assert np.all(np.diff(self._tokens) > 0)
+
+    def prefill_latency_us(self, uncached_tokens: int) -> int:
+        return int(np.interp(uncached_tokens, self._tokens, self._latency_us))
+
+
+class SimpleDecodeOracle:
+    """Sqrt batch degradation decode model (from sim/oracle.py)."""
+    BASE_TOKEN_LATENCY_US = 30
+
+    def decode_latency_us(self, output_tokens: int, active_sequences: int) -> int:
+        batch_factor = max(1.0, np.sqrt(active_sequences))
+        per_token = self.BASE_TOKEN_LATENCY_US * batch_factor
+        return int(output_tokens * per_token)
+
+
+# ---------------------------------------------------------------------------
+# Free functions (from sim/oracle.py) — used by engine directly
+# ---------------------------------------------------------------------------
+
+def transfer_time_us(size_bytes: int, tier) -> int:
+    """T_trans = latency_floor_us + (size_bytes / bandwidth_bytes_per_s) * 1e6"""
+    return int(tier.latency_floor_us + (size_bytes / tier.bandwidth_bytes_per_s) * 1_000_000)
+
+
+def kv_transfer_time_us(kv_bytes: int, bandwidth_bps: int, latency_floor_us: int) -> int:
+    """Time to transfer KV cache from prefill node to decode node."""
+    return latency_floor_us + int((kv_bytes / bandwidth_bps) * 1_000_000)
+
+
+def is_cache_worthwhile(kv_bytes: int, tier, uncached_tokens: int, prefill_oracle) -> bool:
+    """Returns True if restoring from cache is faster than recomputing."""
+    t_trans = transfer_time_us(kv_bytes, tier)
+    t_recalc = prefill_oracle.prefill_latency_us(uncached_tokens)
+    return t_trans < t_recalc
