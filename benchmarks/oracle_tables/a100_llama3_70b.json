@@ -1,0 +1,24 @@
+{
+  "metadata": {
+    "chip": "nvidia_a100_80g",
+    "model": "llama3_70b_fp16",
+    "source": "measured",
+    "confidence": "calibrated",
+    "measured_by": "cache-sim prototype",
+    "date": "2024",
+    "note": "single-sequence prefill, no batching. 64k+ extrapolated from O(n^2) attention scaling."
+  },
+  "points": [
+    {"tokens": 512,    "latency_us": 45000},
+    {"tokens": 1024,   "latency_us": 90000},
+    {"tokens": 2048,   "latency_us": 200000},
+    {"tokens": 4096,   "latency_us": 520000},
+    {"tokens": 8192,   "latency_us": 1400000},
+    {"tokens": 16384,  "latency_us": 4800000},
+    {"tokens": 32768,  "latency_us": 17000000},
+    {"tokens": 65536,  "latency_us": 55000000},
+    {"tokens": 131072, "latency_us": 180000000},
+    {"tokens": 262144, "latency_us": 600000000}
+  ],
+  "extrapolation": "quadratic"
+}
