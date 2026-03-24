@@ -1,0 +1,15 @@
+{
+  "engine_savings_events": 65253,
+  "engine_prefill_duration_samples": 9103,
+  "des_prefill_complete": 10604,
+  "des_decode_complete": 10604,
+  "des_all_events": {
+    "prefill_complete": 10604,
+    "decode_complete": 10604
+  },
+  "warmup_s": 30.0,
+  "sim_duration_s": 300.0,
+  "collection_fraction": 0.9,
+  "ratio_engine_to_des": 0.86,
+  "diagnosis": "Mismatch: ratio=0.86. Investigate which code paths skip _emit."
+}

@@ -1,0 +1,18 @@
+{
+  "object_mode": {
+    "hit_rate": 0.9993,
+    "recompute_mean": 0.2628
+  },
+  "chunk_tail_first": {
+    "hit_rate": 0.256,
+    "recompute_mean": 0.892,
+    "dedup_ratio": 0.7542,
+    "novel_chunks": 57557,
+    "dedup_hits": 176565
+  },
+  "cacheblend_estimate": {
+    "estimated_recompute": 0.7824,
+    "improvement_vs_consecutive": 12.3,
+    "note": "CacheBlend would recompute only missing chunks + 15% selective blend, not everything after first gap"
+  }
+}

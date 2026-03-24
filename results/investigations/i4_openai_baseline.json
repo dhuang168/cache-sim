@@ -1,0 +1,23 @@
+{
+  "50s_fixed": {
+    "baseline_s": 50.0,
+    "anthropic_hits": 10544,
+    "openai_hits": 3363,
+    "total": 10604,
+    "gap_pct": 67.7
+  },
+  "auto_p95": {
+    "baseline_s": 84.1,
+    "anthropic_hits": 10544,
+    "openai_hits": 4842,
+    "total": 10604,
+    "gap_pct": 53.8
+  },
+  "auto_p50": {
+    "baseline_s": 53.4,
+    "anthropic_hits": 10544,
+    "openai_hits": 3523,
+    "total": 10604,
+    "gap_pct": 66.2
+  }
+}

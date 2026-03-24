@@ -1,0 +1,30 @@
+{
+  "ttl": {
+    "L1": 0.2678,
+    "L2": 0.0001379,
+    "L3A": 0.7301,
+    "miss": 0.001977,
+    "tier_sat": {
+      "L1": 75.14,
+      "L2": 99.95,
+      "L3A": 99.73
+    },
+    "l1_to_l2_ttl": 0,
+    "l1_to_l2_pressure": 9135
+  },
+  "lru": {
+    "L1": 0.2678,
+    "L2": 0.0001379,
+    "L3A": 0.7301,
+    "miss": 0.001977,
+    "tier_sat": {
+      "L1": 75.14,
+      "L2": 99.95,
+      "L3A": 99.73
+    },
+    "l1_to_l2_ttl": 0,
+    "l1_to_l2_pressure": 9135
+  },
+  "hypothesis_confirmed": false,
+  "answer": "LRU L2 hit rate (0.0%) vs TTL (0.0%)"
+}
