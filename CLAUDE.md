@@ -359,6 +359,16 @@ When results are unexpected or two configurations that should differ are identic
 5. Fix and validate with data
 6. Add regression test (extreme conditions that catch reintroduction)
 
+### Performance Gate: Profile Before Scale
+Before any sim longer than 2 min or wider than 8 GPUs with new code:
+1. Run a 30-second sim with the feature enabled
+2. Profile with `cProfile` — check top 10 by `tottime`
+3. Verify no function is O(n²) in the hot path
+4. If any function takes >10% of total time and scales with data, optimize first
+5. Gate: 2-min sim at target scale must complete in <30s wall-clock
+
+**Lesson**: Chunk store `evict_lru()` sorted the entire dict per insertion — O(n log n) × 390 chunks/request = 40+ min for a 10-min sim. A 30-second profile would have caught it instantly.
+
 ### Validate Hypotheses With Metrics
 Never state a hypothesis as fact. Add metrics → measure → conclude. Example: "50ms latency causes feedback loop" → add prefill_duration, slot_utilization, cold_evictions_per_epoch → measure correlation → confirm or refute.
 

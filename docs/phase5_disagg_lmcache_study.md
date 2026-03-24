@@ -151,14 +151,58 @@ The bottleneck was `evict_lru()` sorting the entire chunk dict on every insertio
 
 ---
 
-## 7. Recommendations
+## 7. Eviction Strategy: LMCache LRU vs vLLM Tail-First
+
+After investigating how production systems handle chunk eviction (LMCache, vLLM APC, SGLang RadixAttention), we found that LMCache has the **same consecutive-lookup fragility** as our simulator — plain LRU evicts chunks from the middle of prefix chains, orphaning everything after the gap.
+
+vLLM APC solves this with **tail-first tie-breaking**: freed blocks are reversed so tail chunks (high index) enter the LRU queue first and get evicted first. This preserves shared prefixes at low indices.
+
+We implemented both as a feature flag (`chunk_eviction="lru"` vs `"tail_first"`) and compared on the same 4W 3P:1D config:
+
+| Metric | LMCache (LRU) | vLLM (tail-first) | Delta |
+|--------|--------------|-------------------|-------|
+| **Hit rate** | 70.3% | **76.8%** | +6.5pt |
+| **Miss rate** | 29.7% | **23.2%** | −6.5pt |
+| **Recompute** | 73.0% | **54.4%** | **−18.6pt** |
+| **TTFT p50** | 47,506ms | **20,575ms** | **−57%** |
+| **TTFT p95** | 153,954ms | **87,449ms** | **−43%** |
+| **Dedup ratio** | 0.545 | **0.818** | +50% more dedup |
+
+**Tail-first is dramatically better**: 57% lower TTFT p50, 82% dedup ratio. By evicting from the end of prefix chains, shared prefix chunks (indices 0–77 for coding, 0–117 for agentic_coding) stay cached. The consecutive lookup finds longer unbroken prefixes.
+
+### How production systems handle this
+
+| System | Eviction | Gap Handling |
+|--------|----------|-------------|
+| **LMCache** | Plain LRU, position-unaware | Breaks at first missing chunk (same gap problem) |
+| **vLLM APC** | LRU + tail-first tie-breaking | Preserves prefixes by freeing from sequence end |
+| **SGLang Radix** | Leaf-first LRU only | Gaps impossible by construction (tree structure) |
+
+SGLang's radix tree is the cleanest — eviction only affects leaves (sequence ends), and the tree structure guarantees prefix integrity. vLLM's tail-first is a pragmatic approximation that works with block-level storage. LMCache relies on CacheBlend (non-contiguous reuse) for the RAG case but has this gap problem for prefix caching.
+
+### Updated chunk mode comparison (4W, Disagg 3P:1D, global L3A, 10 min)
+
+| Mode | Hit% | Recompute | TTFT p50 | TTFT p95 |
+|------|------|-----------|----------|----------|
+| Legacy (object, no chunk) | 99.7% | 23.8% | 11.0s | 37.6s |
+| Disagg (object) | 99.7% | 23.8% | **9.8s** | **33.7s** |
+| Disagg + LMCache LRU | 70.3% | 73.0% | 47.5s | 154.0s |
+| **Disagg + vLLM tail-first** | **76.8%** | **54.4%** | **20.6s** | **87.4s** |
+
+Tail-first dramatically closes the gap with object mode but still underperforms it for heavy coding. The remaining 23% miss rate comes from session-unique chunks (beyond the shared prefix) that grow rapidly and overflow L1 regardless of eviction order.
+
+---
+
+## 8. Recommendations
 
 1. **Disaggregated P/D is recommended** for all cluster sizes. The 14% TTFT reduction is consistent and the 7% KV transfer overhead is acceptable at 50 GB/s RDMA.
 
-2. **LMCache chunk dedup is NOT recommended for heavy coding workloads.** The consecutive-chunk lookup fragility causes 30–40% miss rates that completely negate the dedup savings. Object-mode per-session storage with PrefixTrie is the right model for long-context coding assistants.
+2. **If using chunk dedup, use vLLM tail-first eviction**, not LMCache LRU. Tail-first is 57% faster TTFT and 50% better dedup ratio for heavy coding workloads. The `chunk_eviction="tail_first"` flag enables this.
 
-3. **Global vs local L3A doesn't matter at controlled load.** The distinction only appears under severe overload with session migration. For capacity-planned deployments, local L3A is sufficient.
+3. **Object-mode per-session storage still outperforms chunk dedup** for heavy coding (99.7% vs 76.8% hit rate). The remaining gap is structural: session-unique context grows past shared prefix and overflows L1 regardless of eviction strategy.
 
-4. **LMCache chunk mode may be viable for chat/batch workloads** with short contexts (<10K tokens). A follow-up study with a chat-heavy workload mix would be informative.
+4. **Global vs local L3A doesn't matter at controlled load.** The distinction only appears under severe overload with session migration.
 
-5. **Potential improvement for chunk mode**: implement non-consecutive chunk reuse (CacheBlend-style) where partial hits recompute only the missing chunks rather than everything after the gap. This is a significant architectural change but would address the fundamental fragility.
+5. **Chunk mode may be viable for chat/batch workloads** with short contexts (<10K tokens) where chunks stay cached. A follow-up study with a chat-heavy workload mix would be informative.
+
+6. **CacheBlend (non-contiguous reuse)** would address the fundamental fragility — reuse cached chunks even with gaps by selectively recomputing only ~15% of tokens. This is a GPU kernel-level change, not just a caching policy.
