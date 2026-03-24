@@ -195,6 +195,30 @@
     },
     "recompute_fraction_mean": 0.2628
   },
+  "scenario_d_global": {
+    "_description": "8-worker global L3A, heavy overload (peak=100, 5min)",
+    "completed": 65253,
+    "combined_hit_rate": 0.998,
+    "hit_rate": {"L1": 0.7538, "L2": 0.005, "L3A": 0.2392, "miss": 0.002},
+    "ttft_p50_s": 4.24,
+    "ttft_p95_s": 165.99,
+    "queue_wait_mean_s": 11.94,
+    "slot_utilization_pct": 88.1,
+    "tier_saturation_pct": {"L1": 70.4, "L2": 87.9, "L3A": 84.7},
+    "recompute_fraction_mean": 0.2635
+  },
+  "scenario_d_local": {
+    "_description": "8-worker local L3A, heavy overload (peak=100, 5min)",
+    "completed": 65253,
+    "combined_hit_rate": 0.998,
+    "hit_rate": {"L1": 0.2291, "L2": 0.0044, "L3A": 0.7645, "miss": 0.002},
+    "ttft_p50_s": 10.87,
+    "ttft_p95_s": 48.99,
+    "queue_wait_mean_s": 7.74,
+    "slot_utilization_pct": 75.9,
+    "tier_saturation_pct": {"L1": 57.2, "L2": 76.3, "L3A": 72.4},
+    "recompute_fraction_mean": 0.2635
+  },
   "tolerances": {
     "hit_rate_absolute": 0.02,
     "ttft_p50_relative": 0.2,

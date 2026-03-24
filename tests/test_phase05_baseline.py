@@ -24,9 +24,13 @@ from sim.engine import SimEngine
 CONFIG_PATH = str(Path(__file__).resolve().parent.parent / "configs" / "heavy_coding.json")
 GOLDEN_PATH = Path(__file__).resolve().parent.parent / "results" / "golden" / "phase05_reference.json"
 
+# Scenarios A-C: controlled load
 PEAK = 15
 SIM_DUR = 300.0
 WARMUP = 30.0
+
+# Scenario D: heavy overload
+PEAK_OVERLOAD = 100  # default from heavy_coding.json
 
 
 def _load_golden():
@@ -195,3 +199,75 @@ class TestScenarioC:
         u1 = results["1w_global"]["slot_util"]
         u4 = results["4w_global"]["slot_util"]
         assert u1 > u4, f"1W util {u1}% should be > 4W util {u4}%"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Scenario D: 8-worker heavy overload (peak=100)
+# This is the stress test that reveals global vs local L3A differences
+# in tier distribution and TTFT under high contention.
+# Runtime: ~3 min per config (global), ~11 min (local)
+# ═══════════════════════════════════════════════════════════════════
+
+def _heavy_config_overload(n_workers: int, l3a_shared: bool = True) -> SimConfig:
+    cfg = SimConfig.from_json(CONFIG_PATH)
+    cfg.sim_duration_s = SIM_DUR  # 5 min
+    cfg.warmup_s = WARMUP
+    cfg.epoch_report_interval_s = 30.0
+    cfg.sim_start_time_s = 36000.0
+    cfg.service.n_prefill_nodes = n_workers * 8
+    cfg.service.n_gpus_per_worker = 8
+    cfg.service.l3a_shared = l3a_shared
+    cfg.service.dispatch_algorithm = "pull"
+    # peak=100 is the default in heavy_coding.json — no override
+    return cfg
+
+
+class TestScenarioD:
+    """8-worker heavy overload: global vs local L3A under contention."""
+
+    @pytest.fixture(scope="class")
+    def global_result(self):
+        return _run_and_extract(_heavy_config_overload(8, True))
+
+    @pytest.fixture(scope="class")
+    def local_result(self):
+        return _run_and_extract(_heavy_config_overload(8, False))
+
+    @pytest.fixture(scope="class")
+    def golden(self):
+        return _load_golden()
+
+    def test_global_hit_rate_matches_golden(self, global_result, golden):
+        ref = golden["scenario_d_global"]["combined_hit_rate"]
+        tol = golden["tolerances"]["hit_rate_absolute"]
+        assert abs(global_result["combined_hit"] - ref) <= tol, (
+            f"Global hit {global_result['combined_hit']:.4f} outside ±{tol} of {ref}"
+        )
+
+    def test_local_hit_rate_matches_golden(self, local_result, golden):
+        ref = golden["scenario_d_local"]["combined_hit_rate"]
+        tol = golden["tolerances"]["hit_rate_absolute"]
+        assert abs(local_result["combined_hit"] - ref) <= tol, (
+            f"Local hit {local_result['combined_hit']:.4f} outside ±{tol} of {ref}"
+        )
+
+    def test_global_higher_l1_hit_fraction(self, global_result, local_result):
+        """Global L3A enables better cache affinity → more L1 hits."""
+        g_l1 = global_result["hit_rate"].get("L1", 0)
+        l_l1 = local_result["hit_rate"].get("L1", 0)
+        assert g_l1 > l_l1 * 2, (
+            f"Global L1 hit {g_l1:.3f} should be >2× local L1 hit {l_l1:.3f}"
+        )
+
+    def test_global_lower_ttft_p50(self, global_result, local_result):
+        """Global L3A → lower TTFT from better cache affinity."""
+        assert global_result["ttft_p50_s"] < local_result["ttft_p50_s"], (
+            f"Global TTFT p50 {global_result['ttft_p50_s']}s should be < "
+            f"local {local_result['ttft_p50_s']}s"
+        )
+
+    def test_completed_count_matches(self, global_result, local_result, golden):
+        """Same seed → same completed count."""
+        ref = golden["scenario_d_global"]["completed"]
+        assert global_result["completed"] == ref
+        assert local_result["completed"] == ref
