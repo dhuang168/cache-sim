@@ -1,0 +1,19 @@
+{
+  "orca": {
+    "label": "Orca",
+    "completed": 6855,
+    "ttft_p50_s": 0.12,
+    "ttft_p95_s": 4.12,
+    "ttft_p99_s": 8.12
+  },
+  "sarathi": {
+    "label": "Sarathi",
+    "completed": 6855,
+    "ttft_p50_s": 0.12,
+    "ttft_p95_s": 4.12,
+    "ttft_p99_s": 8.12
+  },
+  "ttft_p99_change_pct": 0.0,
+  "answer": "Sarathi changes chat TTFT p99 by +0.0% vs Orca",
+  "caveat": "Schema-level comparison \u2014 Sarathi modeled as fewer max_num_seqs, not actual chunked prefill"
+}

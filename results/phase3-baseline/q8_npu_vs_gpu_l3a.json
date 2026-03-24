@@ -1,0 +1,29 @@
+{
+  "npu_local": {
+    "label": "NPU local",
+    "hit_rate": 0.9998,
+    "ttft_p50_s": 8.58,
+    "qw_mean_s": 0.82
+  },
+  "npu_global": {
+    "label": "NPU global",
+    "hit_rate": 0.9998,
+    "ttft_p50_s": 16.29,
+    "qw_mean_s": 13.72
+  },
+  "gpu_local": {
+    "label": "GPU local",
+    "hit_rate": 0.9993,
+    "ttft_p50_s": 6.98,
+    "qw_mean_s": 0.0
+  },
+  "gpu_global": {
+    "label": "GPU global",
+    "hit_rate": 0.9993,
+    "ttft_p50_s": 4.47,
+    "qw_mean_s": 7.26
+  },
+  "npu_hit_delta_pct": 0.0,
+  "gpu_hit_delta_pct": 0.0,
+  "answer": "NPU global-local delta: 0.0pt, GPU delta: 0.0pt"
+}

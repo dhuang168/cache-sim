@@ -1,0 +1,16 @@
+{
+  "engine_completed": 65253,
+  "engine_hit_rate": {
+    "L1": 0.2678,
+    "L2": 0.0001379,
+    "L3A": 0.7301,
+    "miss": 0.001977
+  },
+  "observer_total_decisions": 10604,
+  "observer_hits": 10544,
+  "observer_cold": 21,
+  "observer_expiry": 0,
+  "observer_eviction": 39,
+  "observer_hit_rate": 0.9943,
+  "consistency_check": "PASS"
+}

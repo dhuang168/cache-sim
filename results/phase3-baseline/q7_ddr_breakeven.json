@@ -1,0 +1,23 @@
+{
+  "savings_events": {
+    "CACHE_HIT_L2_WORTHWHILE": 6934,
+    "CACHE_HIT_L3A_BREAK_EVEN": 492,
+    "CACHE_HIT_L3A_WORTHWHILE": 1883,
+    "CACHE_HIT_L1": 29,
+    "COLD_MISS": 2
+  },
+  "cache_hit_rate": {
+    "L1": 0.003105,
+    "L2": 0.7424,
+    "L3A": 0.2543,
+    "miss": 0.0002141
+  },
+  "tier_saturation_pct": {
+    "L1": 58.04,
+    "L2": 99.98,
+    "L3A": 98.11
+  },
+  "l2_hit_rate": 0.7424,
+  "l2_events": 6934,
+  "answer": "L2 hit rate = 74.2% with 6934 worthwhile L2 hits"
+}
