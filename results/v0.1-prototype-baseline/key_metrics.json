@@ -1,0 +1,30 @@
+{
+  "captured_at": "2026-03-23T21:49:15.998627",
+  "git_tag": "v0.1-prototype",
+  "config": "heavy_coding.json",
+  "sim_duration_s": 3600.0,
+  "warmup_s": 300.0,
+  "completed": 5033829,
+  "combined_hit_rate": 0.9985,
+  "hit_rate": {
+    "L1": 0.0,
+    "L2": 0.0008,
+    "L3A": 0.9978,
+    "miss": 0.0015
+  },
+  "recompute_fraction_mean": 0.2103,
+  "ttft_p50_s": 140.747,
+  "ttft_p95_s": 393.968,
+  "tier_saturation_pct": {
+    "L1": 35.9,
+    "L2": 98.09,
+    "L3A": 98.8
+  },
+  "eviction_rate": {
+    "L1_to_L2_pressure": 0.5976,
+    "L1_to_L2_ttl": 0.0,
+    "L2_to_L3A": 0.1218
+  },
+  "sharing_factor": 1.131,
+  "n_tests_passing": 105
+}
