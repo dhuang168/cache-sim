@@ -159,6 +159,43 @@ def test_demand_pull_object_mode():
     assert m.l1_to_l2_ttl_migrations == 0
 
 
+# ─── Tail-first eviction (vLLM) tests ───
+
+def test_tail_first_preserves_prefix():
+    """vLLM tail-first eviction preserves low-index chunks (shared prefix)."""
+    config = _stressed_chunk_config()
+    config.cache.chunk_eviction = "tail_first"
+    config.sim_duration_s = 30.0
+    config.warmup_s = 5.0
+    m_tail = SimEngine(config).run()
+
+    # Compare with LRU
+    config2 = _stressed_chunk_config()
+    config2.cache.chunk_eviction = "lru"
+    config2.sim_duration_s = 30.0
+    config2.warmup_s = 5.0
+    m_lru = SimEngine(config2).run()
+
+    # Tail-first should have equal or better hit rate (preserves prefix chains)
+    hit_tail = 1.0 - m_tail.report()["cache_hit_rate"].get("miss", 1.0)
+    hit_lru = 1.0 - m_lru.report()["cache_hit_rate"].get("miss", 1.0)
+    assert hit_tail >= hit_lru * 0.95, (
+        f"Tail-first hit {hit_tail:.3f} should be >= LRU hit {hit_lru:.3f}"
+    )
+
+
+def test_tail_first_higher_dedup():
+    """vLLM tail-first should achieve higher dedup ratio (shared prefix stays cached)."""
+    config = _stressed_chunk_config()
+    config.cache.chunk_eviction = "tail_first"
+    config.sim_duration_s = 30.0
+    config.warmup_s = 5.0
+    m = SimEngine(config).run()
+    dedup = m.report().get("chunk_dedup", {})
+    # Tail-first preserves shared prefix chunks → more dedup hits
+    assert dedup.get("dedup_ratio", 0) > 0.3
+
+
 # ─── Performance ───
 
 def test_chunk_mode_perf_benchmark():

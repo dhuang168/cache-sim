@@ -176,6 +176,7 @@ class SimEngine:
         # Chunk dedup mode
         self._chunk_mode = config.cache.deduplication == "chunk"
         self._demand_pull = config.cache.tier_migration == "demand_pull"
+        self._tail_first_eviction = config.cache.chunk_eviction == "tail_first"
         self._chunk_stores: dict[int, dict[Tier, ChunkTierStore]] = {}  # node_id -> {tier -> store}
         self._chunk_index = ChunkIndex() if self._chunk_mode else None
         if self._chunk_mode:
@@ -1139,7 +1140,7 @@ class SimEngine:
             free_space = l1.capacity_bytes - l1.used_bytes
             if free_space < novel_total_bytes:
                 needed = novel_total_bytes - free_space
-                evicted = l1.evict_lru(needed)
+                evicted = self._chunk_evict(l1, needed)
                 self._cascade_evicted_chunks(evicted, Tier.L1, stores)
 
             for i, ch in novel_hashes:
@@ -1161,7 +1162,7 @@ class SimEngine:
                     chunk_obj.block_layout = TIER_TO_LAYOUT[Tier.L2]
                     l2 = stores[Tier.L2]
                     if not l2.can_fit(chunk_size):
-                        evicted_l2 = l2.evict_lru(chunk_size)
+                        evicted_l2 = self._chunk_evict(l2, chunk_size)
                         self._cascade_evicted_chunks(evicted_l2, Tier.L2, stores)
                     if l2.can_fit(chunk_size):
                         l2.insert_or_ref(ch, chunk_obj)
@@ -1173,7 +1174,7 @@ class SimEngine:
                         chunk_obj.is_hibernated = True
                         l3a = stores[Tier.L3A]
                         if not l3a.can_fit(chunk_size):
-                            l3a.evict_lru(chunk_size)
+                            self._chunk_evict(l3a, chunk_size)
                         if l3a.can_fit(chunk_size):
                             l3a.insert_or_ref(ch, chunk_obj)
 
@@ -1183,6 +1184,12 @@ class SimEngine:
             self.metrics.chunk_total_logical += total_chunks
 
         self._chunk_index.register_chunks(session_id, registered)
+
+    def _chunk_evict(self, store: ChunkTierStore, n_bytes: int) -> list[str]:
+        """Dispatch to the configured chunk eviction strategy."""
+        if self._tail_first_eviction:
+            return store.evict_tail_first(n_bytes)
+        return store.evict_lru(n_bytes)
 
     def _get_chunk_stores_for_node(self, node_id: int) -> list[ChunkTierStore]:
         """Return [L1, L2, L3A] chunk stores for a node, in search order."""
@@ -1221,10 +1228,10 @@ class SimEngine:
             )
             if not target.can_fit(chunk_size):
                 if target_tier == Tier.L2:
-                    evicted_l2 = target.evict_lru(chunk_size)
+                    evicted_l2 = self._chunk_evict(target, chunk_size)
                     self._cascade_evicted_chunks(evicted_l2, Tier.L2, stores)
                 else:
-                    target.evict_lru(chunk_size)  # L3A = permanent loss
+                    self._chunk_evict(target, chunk_size)  # L3A = permanent loss
             if target.can_fit(chunk_size):
                 target.insert_or_ref(ch, chunk_obj)
 
@@ -1260,7 +1267,7 @@ class SimEngine:
                     obj.last_accessed_at_us = self.sim_clock_us
                     obj.is_hibernated = False
                     if not l1.can_fit(obj.size_bytes):
-                        l1.evict_lru(obj.size_bytes)
+                        self._chunk_evict(l1, obj.size_bytes)
                     if l1.can_fit(obj.size_bytes):
                         l1.insert_or_ref(ch, obj)
                         if collecting:

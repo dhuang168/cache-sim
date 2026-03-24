@@ -88,6 +88,7 @@ class CacheConfig:
     eviction_policy: str = "ttl"  # "ttl" (timer with access-based refresh) or "lru" (reactive, evict only on pressure)
     deduplication: str = "per_session"  # "per_session" (monolithic objects) or "chunk" (LMCache-style chunk dedup)
     tier_migration: str = "ttl_push"  # "ttl_push" (scheduled demotion) or "demand_pull" (promote on hit)
+    chunk_eviction: str = "lru"  # "lru" (LMCache: position-unaware) or "tail_first" (vLLM: evict high-index first)
     sharing: SharingConfig = field(default_factory=SharingConfig)
 
     def validate(self) -> None:

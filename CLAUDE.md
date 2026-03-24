@@ -270,6 +270,7 @@ When `cache.deduplication="chunk"`, KV is stored at **fixed-size chunk granulari
 |-------|---------|---------|
 | `deduplication` | `"per_session"` | `"per_session"` (monolithic objects) or `"chunk"` (LMCache-style) |
 | `tier_migration` | `"ttl_push"` | `"ttl_push"` (scheduled demotion) or `"demand_pull"` (promote on hit) |
+| `chunk_eviction` | `"lru"` | `"lru"` (LMCache: position-unaware) or `"tail_first"` (vLLM: evict tail chunks first, preserve prefix) |
 
 **Constraints:**
 - `deduplication="chunk"` requires `block_size_tokens > 0`

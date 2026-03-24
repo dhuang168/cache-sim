@@ -5,6 +5,7 @@ LMCache-style: KV is stored at fixed-size chunk granularity (default 256 tokens)
 Identical chunks across sessions share storage via ref counting.
 """
 from __future__ import annotations
+import heapq
 import math
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -48,6 +49,9 @@ class ChunkTierStore:
         # Two-bucket LRU: single-ref evicted first, multi-ref evicted second
         self._single_ref: OrderedDict[str, None] = OrderedDict()
         self._multi_ref: OrderedDict[str, None] = OrderedDict()
+        # Max-heap by chunk_index for tail-first eviction (stores (-chunk_index, hash))
+        self._single_ref_heap: list[tuple[int, str]] = []  # max-heap via negated index
+        self._multi_ref_heap: list[tuple[int, str]] = []
         # Precomputed alloc size for uniform chunks (set by engine)
         self._uniform_alloc: int = 0
 
@@ -83,6 +87,7 @@ class ChunkTierStore:
             if existing.ref_count == 2 and chunk_hash in self._single_ref:
                 del self._single_ref[chunk_hash]
                 self._multi_ref[chunk_hash] = None
+                heapq.heappush(self._multi_ref_heap, (-existing.chunk_index, chunk_hash))
             # Touch in current bucket (move to end = most recent)
             elif chunk_hash in self._multi_ref:
                 self._multi_ref.move_to_end(chunk_hash)
@@ -92,6 +97,7 @@ class ChunkTierStore:
         self.used_bytes += alloc
         # New chunk always starts in single-ref bucket
         self._single_ref[chunk_hash] = None
+        heapq.heappush(self._single_ref_heap, (-chunk.chunk_index, chunk_hash))
         return True  # novel
 
     def remove(self, chunk_hash: str) -> Optional[ChunkObject]:
@@ -121,10 +127,11 @@ class ChunkTierStore:
             # Demote from multi to single bucket
             del self._multi_ref[chunk_hash]
             self._single_ref[chunk_hash] = None
+            heapq.heappush(self._single_ref_heap, (-chunk.chunk_index, chunk_hash))
         return False
 
     def evict_lru(self, n_bytes_needed: int) -> list[str]:
-        """Evict chunks by LRU using two-bucket strategy. O(k) where k = chunks evicted."""
+        """LMCache-style: evict by LRU, position-unaware. O(k) where k = chunks evicted."""
         evicted = []
         freed = 0
         alloc = self._uniform_alloc
@@ -148,6 +155,42 @@ class ChunkTierStore:
                 self.used_bytes -= a
                 freed += a
                 evicted.append(chunk_hash)
+
+        return evicted
+
+    def evict_tail_first(self, n_bytes_needed: int) -> list[str]:
+        """vLLM-style: evict highest chunk_index first (tail of prefix chain).
+        Preserves shared prefixes at low indices. Uses max-heap for O(log n) per eviction."""
+        evicted = []
+        freed = 0
+        alloc = self._uniform_alloc
+
+        # Phase 1: single-ref chunks via max-heap (highest chunk_index first)
+        while freed < n_bytes_needed and self._single_ref_heap:
+            neg_idx, ch = heapq.heappop(self._single_ref_heap)
+            # Lazy deletion: skip if chunk no longer in single-ref bucket
+            if ch not in self._single_ref:
+                continue
+            chunk = self.chunks.pop(ch, None)
+            if chunk:
+                del self._single_ref[ch]
+                a = alloc if alloc > 0 else chunk.block_count * self.block_size_bytes
+                self.used_bytes -= a
+                freed += a
+                evicted.append(ch)
+
+        # Phase 2: multi-ref chunks via max-heap
+        while freed < n_bytes_needed and self._multi_ref_heap:
+            neg_idx, ch = heapq.heappop(self._multi_ref_heap)
+            if ch not in self._multi_ref:
+                continue
+            chunk = self.chunks.pop(ch, None)
+            if chunk:
+                del self._multi_ref[ch]
+                a = alloc if alloc > 0 else chunk.block_count * self.block_size_bytes
+                self.used_bytes -= a
+                freed += a
+                evicted.append(ch)
 
         return evicted
 
