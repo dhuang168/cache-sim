@@ -271,7 +271,9 @@ class OracleFactory:
 # ---------------------------------------------------------------------------
 
 class SimplePrefillOracle:
-    """Piecewise-linear prefill oracle using numpy interp (from sim/oracle.py)."""
+    """Piecewise-linear prefill oracle using numpy interp (from sim/oracle.py).
+    Returns bare int for backward compat. Use prefill_latency_with_confidence()
+    for contract-compliant (latency, ConfidenceLabel) tuple."""
 
     def __init__(self, table_path: str):
         with open(table_path) as f:
@@ -279,19 +281,40 @@ class SimplePrefillOracle:
         self._tokens = np.array(data["tokens"], dtype=float)
         self._latency_us = np.array(data["latency_us"], dtype=float)
         assert np.all(np.diff(self._tokens) > 0)
+        # Detect confidence from metadata if present
+        meta = data.get("metadata", data.get("note", ""))
+        if isinstance(meta, dict):
+            conf_str = meta.get("confidence", "calibrated")
+            try:
+                self.confidence = ConfidenceLabel(conf_str)
+            except ValueError:
+                self.confidence = ConfidenceLabel.CALIBRATED
+        else:
+            self.confidence = ConfidenceLabel.CALIBRATED
 
     def prefill_latency_us(self, uncached_tokens: int) -> int:
+        """Backward-compatible: returns bare int."""
         return int(np.interp(uncached_tokens, self._tokens, self._latency_us))
+
+    def prefill_latency_with_confidence(self, uncached_tokens: int) -> tuple[int, ConfidenceLabel]:
+        """Contract-compliant: returns (latency_us, confidence_label)."""
+        return self.prefill_latency_us(uncached_tokens), self.confidence
 
 
 class SimpleDecodeOracle:
     """Sqrt batch degradation decode model (from sim/oracle.py)."""
     BASE_TOKEN_LATENCY_US = 30
+    confidence = ConfidenceLabel.CALIBRATED
 
     def decode_latency_us(self, output_tokens: int, active_sequences: int) -> int:
+        """Backward-compatible: returns bare int."""
         batch_factor = max(1.0, np.sqrt(active_sequences))
         per_token = self.BASE_TOKEN_LATENCY_US * batch_factor
         return int(output_tokens * per_token)
+
+    def decode_latency_with_confidence(self, output_tokens: int, active_sequences: int) -> tuple[int, ConfidenceLabel]:
+        """Contract-compliant: returns (latency_us, confidence_label)."""
+        return self.decode_latency_us(output_tokens, active_sequences), self.confidence
 
 
 # ---------------------------------------------------------------------------

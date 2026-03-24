@@ -782,21 +782,36 @@ class SimEngine:
 
         # Emit PREFILL_COMPLETE DESEvent
         queue_wait_us = ttft - prefill_us if ttft > prefill_us else 0
+        ttft_comp = payload.get("ttft_component", "cold_miss")
+        # Map ttft_component to cache_tier for SavingsEvent classification
+        _tier_map = {"L1_hit": "L1", "L2_hit": "L2", "L3A_hit": "L3A", "cold_miss": None}
+        cache_tier_str = _tier_map.get(ttft_comp)
+        cached_tokens = payload.get("cached_tokens", 0)
+        uncached_tokens = payload.get("uncached_tokens", 0)
+        kv_bytes = cached_tokens * (2 * self.config.model.n_layers * self.config.model.n_kv_heads
+                                     * self.config.model.head_dim * self.config.model.bytes_per_element) if cached_tokens > 0 else 0
+        # Generate CacheKey for this request
+        prefix_hash = f"{event.session_id}:{cached_tokens}" if cached_tokens > 0 else "miss"
+        cache_key = CacheKey(
+            model_id=self.config.model.model_id,
+            tokenizer_id="default",
+            prefix_hash=prefix_hash,
+        )
         self._emit(DESEventKind.PREFILL_COMPLETE, {
             "session_id": event.session_id,
             "request_id": request_id,
             "ttft_us": ttft,
             "prefill_latency_us": prefill_us,
             "queue_wait_prefill_us": queue_wait_us,
-            "cache_tier": payload.get("ttft_component", "cold_miss"),
+            "cache_tier": ttft_comp,
             "savings_event": SavingsEvent.classify(
-                payload.get("ttft_component", "cold_miss").replace("_hit", "").upper() if "hit" in payload.get("ttft_component", "") else None,
-                payload.get("prefill_us", 0),
-                payload.get("prefill_us", 0),  # simplified — transfer cost ≈ 0 for L1
+                cache_tier_str, prefill_us, prefill_us,
             ).value,
-            "bytes_loaded": payload.get("cached_tokens", 0) * 327680,  # approx kv_bytes
-            "cached_tokens": payload.get("cached_tokens", 0),
-            "uncached_tokens": payload.get("uncached_tokens", 0),
+            "cache_key": cache_key,
+            "bytes_loaded": kv_bytes,
+            "latency_source": "bandwidth" if cache_tier_str else "miss",
+            "cached_tokens": cached_tokens,
+            "uncached_tokens": uncached_tokens,
         })
 
         # Sharing tracking

@@ -5,6 +5,8 @@ from typing import Literal
 
 import numpy as np
 
+from agentsim.core.contracts import ObserverBase, DESEvent, DESEventKind
+
 SavingsClass = Literal[
     "CACHE_HIT_L1",
     "CACHE_HIT_L2_WORTHWHILE",
@@ -270,3 +272,41 @@ class MetricsCollector:
             result["decode_queue_wait_ms"] = dq
 
         return result
+
+
+class MetricsObserver(ObserverBase):
+    """
+    Contract-compliant observer wrapper around MetricsCollector.
+
+    Receives DESEvents and extracts metrics from payloads.
+    Can be registered as an engine observer alongside direct metrics access.
+
+    Usage:
+        collector = MetricsCollector()
+        observer = MetricsObserver(collector)
+        engine = SimEngine(config, observers=[observer])
+    """
+
+    def __init__(self, collector: MetricsCollector):
+        self.collector = collector
+        self._prefill_count = 0
+        self._decode_count = 0
+
+    def on_event(self, event: DESEvent) -> None:
+        if event.kind == DESEventKind.PREFILL_COMPLETE:
+            self._on_prefill_complete(event)
+        elif event.kind == DESEventKind.DECODE_COMPLETE:
+            self._on_decode_complete(event)
+
+    def _on_prefill_complete(self, event: DESEvent) -> None:
+        self._prefill_count += 1
+
+    def _on_decode_complete(self, event: DESEvent) -> None:
+        self._decode_count += 1
+
+    @property
+    def event_counts(self) -> dict:
+        return {
+            "prefill_complete": self._prefill_count,
+            "decode_complete": self._decode_count,
+        }
