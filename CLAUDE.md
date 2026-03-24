@@ -359,6 +359,16 @@ When results are unexpected or two configurations that should differ are identic
 5. Fix and validate with data
 6. Add regression test (extreme conditions that catch reintroduction)
 
+### Reflection Cycle: Cross-Check Before Moving On
+After completing research questions or experiments:
+1. Cross-reference ALL results against each other and prior findings
+2. Identify inconsistencies, unexplained trends, suspicious zeroes
+3. Categorize: triage (simulator bug?) / design insight / test artifact
+4. Plan max 7 investigations with hypotheses and scripts
+5. Run, update report, reflect again — repeat until clean
+
+**Lesson**: Q1-Q11 analysis found 6 inconsistencies including a possible emission bug (observer 6:1 gap) and a model pessimism issue (chunk mode) that would have been shipped as conclusions without this step.
+
 ### Performance Gate: Profile Before Scale
 Before any sim longer than 2 min or wider than 8 GPUs with new code:
 1. Run a 30-second sim with the feature enabled
