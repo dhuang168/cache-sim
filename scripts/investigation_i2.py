@@ -14,7 +14,7 @@ OUT = Path(__file__).resolve().parent.parent / "results" / "investigations"
 OUT.mkdir(parents=True, exist_ok=True)
 
 results = {}
-for dur_min in [2, 5, 10, 15, 20]:
+for dur_min in [2, 5, 10]:  # capped at 10min (15/20 too slow at peak=100)
     for shared, label in [(True, "global"), (False, "local")]:
         cfg = SimConfig.from_json("configs/heavy_coding.json")
         cfg.sim_duration_s = dur_min * 60.0
@@ -32,7 +32,7 @@ for dur_min in [2, 5, 10, 15, 20]:
         print(f"  {key}: hit={hit:.3f} L3A_sat={l3a_sat:.1f}%")
 
 print("\n=== I2 Answer: Saturation Timeline ===")
-for dur_min in [2, 5, 10, 15, 20]:
+for dur_min in [2, 5, 10]:  # capped at 10min (15/20 too slow at peak=100)
     g = results[f"{dur_min}min_global"]
     l = results[f"{dur_min}min_local"]
     delta = (g["hit"] - l["hit"]) * 100
