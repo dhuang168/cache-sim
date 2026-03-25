@@ -30,16 +30,10 @@ class PrefillNode:
         self.prefill_queue_max = prefill_queue_max
         self.pending_prefills: deque[tuple] = deque()
         self.active_completions: list[int] = []  # sorted completion times
-
     def has_session_cached(self, session_id: str) -> bool:
-        """Check if any KV object for this session is in this node's L1 or worker's L2."""
-        for obj in self.l1_store.objects.values():
-            if obj.session_id == session_id:
-                return True
-        for obj in self.l2_store.objects.values():
-            if obj.session_id == session_id:
-                return True
-        return False
+        """Check if any KV object for this session is in this node's L1 or worker's L2. O(1).
+        Uses TierStore._session_refcount — tracks exact object presence."""
+        return self.l1_store.has_session(session_id) or self.l2_store.has_session(session_id)
 
     def projected_free_time_us(self, current_us: int) -> int:
         """Earliest time a prefill slot becomes available."""

@@ -1,0 +1,28 @@
+{
+  "old": {
+    "time_s": 8.6,
+    "completed": 15206,
+    "hit": {
+      "L1": 0.8137,
+      "L2": 0.009273,
+      "L3A": 0.1756,
+      "miss": 0.001447
+    }
+  },
+  "new": {
+    "time_s": 2.0,
+    "completed": 15206,
+    "hit": {
+      "L1": 0.8009,
+      "L2": 0.009273,
+      "L3A": 0.1884,
+      "miss": 0.001447
+    }
+  },
+  "5min_new": {
+    "time_s": 72.0,
+    "completed": 65253
+  },
+  "identical": false,
+  "speedup_2min": 4.3
+}

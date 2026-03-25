@@ -80,6 +80,7 @@ class TierStore:
         self.block_size_bytes = block_size_bytes
         self.objects: dict[str, CacheObject] = {}  # cache_key -> CacheObject
         self.used_bytes: int = 0
+        self._session_refcount: dict[str, int] = {}  # session_id -> count of objects in this store
 
     def allocated_bytes_for(self, obj: CacheObject) -> int:
         return obj.block_count * self.block_size_bytes
@@ -98,12 +99,24 @@ class TierStore:
         alloc = obj.block_count * self.block_size_bytes
         self.objects[key] = obj
         self.used_bytes += alloc
+        sid = obj.session_id
+        self._session_refcount[sid] = self._session_refcount.get(sid, 0) + 1
 
     def remove(self, key: str) -> Optional[CacheObject]:
         obj = self.objects.pop(key, None)
         if obj is not None:
             self.used_bytes -= obj.block_count * self.block_size_bytes
+            sid = obj.session_id
+            rc = self._session_refcount.get(sid, 1) - 1
+            if rc <= 0:
+                self._session_refcount.pop(sid, None)
+            else:
+                self._session_refcount[sid] = rc
         return obj
+
+    def has_session(self, session_id: str) -> bool:
+        """O(1) check if any object for this session is in this store."""
+        return session_id in self._session_refcount
 
     def get(self, key: str) -> Optional[CacheObject]:
         return self.objects.get(key)
