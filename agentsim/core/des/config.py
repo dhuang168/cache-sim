@@ -62,6 +62,9 @@ class ServiceConfig:
     kv_transfer_latency_floor_us: int = 2000  # 2ms fixed overhead
     prefill_latency_multiplier: float = 1.0  # <1.0 = speedup from no decode interference
     decode_batch_fill_factor: float = 0.7  # avg decode batch utilization
+    # Prefix-hash routing (OpenAI-style)
+    prefix_hash_tokens: int = 256  # tokens used for routing hash (0 = use session_id)
+    prefix_hash_overflow_threshold: float = 0.9  # queue pressure threshold for overflow
 
 
 @dataclass

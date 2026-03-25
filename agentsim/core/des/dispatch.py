@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 from collections import deque
 from typing import Optional
 
@@ -150,3 +151,67 @@ class PullDispatcher:
         session_id, request_id, payload, _ = self.global_queue[best_idx]
         del self.global_queue[best_idx]
         return (session_id, request_id, payload)
+
+
+class PrefixHashDispatcher:
+    """OpenAI-style prefix-hash routing.
+
+    Routes requests to a target node based on a hash of the first N tokens
+    of the prefix (profile name + shared prefix as proxy). If the target
+    node is overloaded (queue pressure > threshold), overflows to the
+    least-loaded node — modeling the ~15 req/min overflow behavior.
+
+    This creates hotspots: popular system prompts concentrate on a few nodes
+    while others sit idle. The overflow mechanism degrades cache hit rates
+    because overflow nodes don't have the cached KV.
+    """
+
+    def __init__(
+        self,
+        nodes: list[PrefillNode],
+        prefix_hash_tokens: int = 256,
+        overflow_threshold: float = 0.9,
+    ):
+        self.nodes = nodes
+        self.prefix_hash_tokens = prefix_hash_tokens
+        self.overflow_threshold = overflow_threshold
+        self.overflow_count = 0
+        self.total_dispatches = 0
+
+    def _compute_prefix_hash(self, profile_name: str, shared_prefix_tokens: int) -> int:
+        """Hash the first N tokens of the prefix.
+
+        In production, this would hash actual token IDs. We approximate by
+        hashing (profile_name, min(shared_prefix_tokens, prefix_hash_tokens))
+        since all sessions of the same profile share the same system prompt.
+        """
+        prefix_key = f"{profile_name}:{min(shared_prefix_tokens, self.prefix_hash_tokens)}"
+        h = hashlib.md5(prefix_key.encode()).hexdigest()
+        return int(h, 16)
+
+    def dispatch(
+        self,
+        session_id: str,
+        request_id: str,
+        payload: dict,
+        current_us: int,
+    ) -> PrefillNode:
+        """Route to target node by prefix hash. Overflow if overloaded."""
+        self.total_dispatches += 1
+
+        profile_name = payload.get("profile", "")
+        shared_prefix = payload.get("shared_prefix_tokens", 0)
+        prefix_hash = self._compute_prefix_hash(profile_name, shared_prefix)
+        target_idx = prefix_hash % len(self.nodes)
+        target_node = self.nodes[target_idx]
+
+        # Check if target is overloaded
+        if target_node.queue_pressure() < self.overflow_threshold:
+            return target_node
+
+        # Overflow: route to least-loaded node (cold miss likely)
+        self.overflow_count += 1
+        return min(
+            self.nodes,
+            key=lambda n: (n.queue_pressure(), n.projected_free_time_us(current_us)),
+        )

@@ -19,7 +19,7 @@ from agentsim.core.des.eviction import EvictionEngine
 from agentsim.core.des.metrics import MetricsCollector
 from agentsim.core.des.node import PrefillNode, DecodeNode
 from agentsim.core.des.chunk_store import ChunkObject, ChunkTierStore, ChunkIndex, chunk_hash_for
-from agentsim.core.des.dispatch import PushDispatcher, SmartPushDispatcher, PullDispatcher
+from agentsim.core.des.dispatch import PushDispatcher, SmartPushDispatcher, PullDispatcher, PrefixHashDispatcher
 from agentsim.core.contracts import DESEvent, DESEventKind, ObserverBase, SavingsEvent, CacheKey
 
 
@@ -153,6 +153,12 @@ class SimEngine:
             self.dispatcher = SmartPushDispatcher(
                 self.nodes,
                 l3a_store=self._shared_l3a if self._l3a_shared else None,
+            )
+        elif config.service.dispatch_algorithm == "prefix_hash":
+            self.dispatcher = PrefixHashDispatcher(
+                self.nodes,
+                prefix_hash_tokens=config.service.prefix_hash_tokens,
+                overflow_threshold=config.service.prefix_hash_overflow_threshold,
             )
         else:
             self.dispatcher = PushDispatcher(self.nodes)
@@ -394,6 +400,7 @@ class SimEngine:
                 "output_tokens": output_len,
                 "total_context": sess.context_tokens,
                 "turn": sess.turn,
+                "shared_prefix_tokens": profile.shared_system_prefix_tokens,
             },
         ))
 
