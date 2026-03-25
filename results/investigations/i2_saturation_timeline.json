@@ -5,7 +5,7 @@
   },
   "2min_local": {
     "hit": 0.9986,
-    "l3a_sat": 79.6
+    "l3a_sat": 79.7
   },
   "5min_global": {
     "hit": 0.998,
@@ -17,10 +17,26 @@
   },
   "10min_global": {
     "hit": 0.9973,
-    "l3a_sat": 99.7
+    "l3a_sat": 99.6
   },
   "10min_local": {
     "hit": 0.9973,
-    "l3a_sat": 95.6
+    "l3a_sat": 95.7
+  },
+  "15min_global": {
+    "hit": 0.9973,
+    "l3a_sat": 99.7
+  },
+  "15min_local": {
+    "hit": 0.9973,
+    "l3a_sat": 97.0
+  },
+  "20min_global": {
+    "hit": 0.9977,
+    "l3a_sat": 99.8
+  },
+  "20min_local": {
+    "hit": 0.9977,
+    "l3a_sat": 97.7
   }
 }

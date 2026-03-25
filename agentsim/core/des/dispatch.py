@@ -127,25 +127,25 @@ class PullDispatcher:
     ) -> None:
         self.global_queue.append((session_id, request_id, payload, arrival_us))
 
+    # Max jobs to scan per pull — caps O(queue_size) to O(K).
+    # Production systems (llm-d, Mooncake) score top candidates, not entire queue.
+    MAX_SCAN = 64
+
     def pull(self, node: PrefillNode, current_us: int) -> Optional[tuple[str, str, dict]]:
-        """Pull best job for this node from the global queue."""
+        """Pull best job for this node from the global queue.
+        Scans up to MAX_SCAN oldest jobs for affinity; takes oldest if none match."""
         if not self.global_queue:
             return None
 
-        best_idx = -1
-        best_score = float('-inf')
-        AFFINITY_BONUS = 1_000_000_000  # 1000s in us — huge bonus
+        best_idx = 0  # default: oldest job (front of queue)
+        scan_limit = min(len(self.global_queue), self.MAX_SCAN)
 
-        for i, (session_id, request_id, payload, arrival_us) in enumerate(self.global_queue):
-            age_us = current_us - arrival_us
-            affinity = AFFINITY_BONUS if node.has_session_cached(session_id) else 0
-            score = affinity + age_us
-            if score > best_score:
-                best_score = score
+        # Scan first K jobs — if any has affinity, take it (highest age wins ties)
+        for i in range(scan_limit):
+            session_id = self.global_queue[i][0]
+            if node.has_session_cached(session_id):
                 best_idx = i
-
-        if best_idx < 0:
-            return None
+                break  # first affinity match among oldest jobs — good enough
 
         session_id, request_id, payload, _ = self.global_queue[best_idx]
         del self.global_queue[best_idx]

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import heapq
 from typing import Optional
 
 from agentsim.core.des.config import SimConfig
@@ -45,9 +46,12 @@ class EvictionEngine:
         l1 = self.stores[Tier.L1]
         l2 = self.stores[Tier.L2]
 
-        # Sort candidates: private (ref_count==1) first, then by oldest access
-        candidates = sorted(
-            l1.objects.items(),
+        # Use heapq.nsmallest to avoid full sort — only need enough to free n_bytes
+        # Estimate how many objects we need (upper bound)
+        avg_size = max(1, l1.used_bytes // max(1, len(l1.objects)))
+        est_count = min(len(l1.objects), max(4, (n_bytes_needed // avg_size) * 2 + 4))
+        candidates = heapq.nsmallest(
+            est_count, l1.objects.items(),
             key=lambda kv: (kv[1].ref_count > 1, kv[1].last_accessed_at_us),
         )
 
