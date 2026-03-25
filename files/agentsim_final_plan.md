@@ -566,6 +566,32 @@ class SimEngine:
         ))
 ```
 
+### Research Questions This Phase Answers
+
+Phase 1 is the first phase where the engine runs real workloads. These
+questions can be answered here for the first time and golden files
+captured for regression testing going forward.
+
+**Q1: At what worker count does global L3A become essential?**
+Run Scenario C (node scaling: 1/2/4 workers) and record the crossover
+point where local L3A hit rate drops below 90%. This is the inflection
+point that informs deployment topology decisions.
+
+**Q2: What is the steady-state cache hit rate distribution under heavy
+agentic coding load on a single worker?**
+Run Scenario A and record the SavingsEvent breakdown: how many requests
+are HIT_L1 vs HIT_L2_WIN vs HIT_L3_WIN vs MISS_RECOMPUTE. This is the
+baseline against which all framework optimizations in Phase 4 are measured.
+
+**Q3: What fraction of sessions experience at least one TTL expiry
+miss under realistic inter-turn think times?**
+Run the agentic_coding profile for 20 minutes and record the expiry
+miss rate. This establishes whether the 5-min TTL is a meaningful
+problem for this workload or a theoretical concern.
+
+Golden files for these three questions are captured at the Phase 1 gate
+and committed to `results/phase1-baseline/`.
+
 ### Gate: Phase 1 Complete
 - [ ] All three benchmark scenarios pass tolerance bands (from Phase 0.5)
 - [ ] Global/local L3A delta ≥25 percentage points reproduced
@@ -581,6 +607,8 @@ class SimEngine:
 - [ ] No-cache baseline test passes (see `test_invariants.py` — new test):
   with cache disabled, hit rate = 0%, all TTFT values match cold oracle
 - [ ] Heavy coding report reproducible via `python scripts/reproduce_cache_sim_baseline.py`
+- [ ] Golden files captured and committed to `results/phase1-baseline/`:
+  Q1 node-scaling crossover point, Q2 SavingsEvent breakdown, Q3 expiry miss rate
 
 ---
 
@@ -679,6 +707,26 @@ class OpenAIProtocolObserver(ProtocolObserver):
         )
 ```
 
+### Research Questions This Phase Answers
+
+Phase 2 adds the protocol observation layer. For the first time, cache
+decisions can be interpreted through the lens of the Anthropic and
+OpenAI API event streams — the same view a real client would have.
+
+**Q4: Does the Anthropic cache miss taxonomy correctly classify all
+miss types in the heavy coding workload?**
+Run the heavy_coding scenario through the AnthropicProtocolObserver
+and verify the COLD / EXPIRY / EVICTION / TRANSFER breakdown is
+consistent with the Phase 1 SavingsEvent numbers. If they diverge,
+the observation layer has a mapping bug.
+
+**Q5: What fraction of cache misses would be invisible to an OpenAI
+API client vs an Anthropic API client?**
+Compare the miss detection rate of OpenAIChatEventMapper (TTFT-inferred)
+against AnthropicProtocolObserver (explicit cache tokens) on the same
+session stream. This quantifies the observability gap between protocols
+and informs monitoring strategy.
+
 ### Gate: Phase 2 Complete
 - [ ] All checkpoint events consumed from DES events, not SimPy
 - [ ] `AnthropicProtocolObserver.on_event()` correctly classifies all
@@ -704,12 +752,15 @@ for one non-GPU target.
 
 ### Tier Parameterization
 
-The Core DES engine's tier specs become config-driven:
+The Core DES engine's tier specs become config-driven. Two NPU configs
+are provided — local and global L3A — mirroring the GPU toggle that
+produced the central finding in Phase 1. This lets us ask the same
+global vs local question on non-GPU hardware.
 
 ```python
-# configs/custom_npu_hbm_ddr.json
+# configs/custom_npu_local_l3a.json
 {
-  "chip_name": "custom_npu_v1",
+  "chip_name": "custom_npu_local_l3a",
   "confidence": "analytical-only",
   "oracle_table": null,
   "tiers": [
@@ -718,7 +769,7 @@ The Core DES engine's tier specs become config-driven:
       "medium": "HBM",
       "capacity_bytes": 34359738368,    // 32 GB
       "bandwidth_bps":  966367641600,   // 900 GB/s
-      "block_size_bytes": 4194304,      // 4 MB (not 4K tokens — 4K token × bytes/token)
+      "block_size_bytes": 4194304,      // 4K-token page × ~320 bytes/token (placeholder)
       "scope": "per_gpu",
       "latency_floor_us": 1
     },
@@ -729,19 +780,32 @@ The Core DES engine's tier specs become config-driven:
       "bandwidth_bps":  214748364800,   // 200 GB/s
       "block_size_bytes": 33554432,     // 32 MB
       "scope": "per_worker",
-      "latency_floor_us": 50
+      "latency_floor_us": 200
+    },
+    {
+      "name": "L3A",
+      "medium": "SSD",
+      "capacity_bytes": 8796093022208,  // 8 TB
+      "bandwidth_bps":  7516192768,     // 7 GB/s
+      "block_size_bytes": 268435456,    // 256 MB
+      "scope": "per_worker",
+      "latency_floor_us": 1000,
+      "remote_latency_us": 0
     }
   ],
   "interconnect_bps": 429496729600,    // 400 GB/s
   "n_gpus_per_worker": 4
 }
+
+// configs/custom_npu_global_l3a.json — identical except:
+//   "scope": "global"
+//   "remote_latency_us": 50000        // 50ms cross-worker, same as GPU
 ```
 
-**Note on "4K page size"**: In the original spec, "4K page size" means 4096
-tokens per KV page. In the byte-based model this translates to:
-`4096 tokens × bytes_per_token` = depends on model.
-For Llama3-70B BF16: 4096 × (80 layers × 8 kv_heads × 128 head_dim × 2 × 2) = ~671 MB.
-The block_size_bytes in the tier spec captures this correctly.
+**Note on "4K page size"**: "4K" means 4096 tokens per KV page.
+In bytes for Llama3-70B BF16: 4096 × (80 layers × 8 kv_heads × 128 dim × 2 × 2) ≈ 671 MB.
+The placeholder `block_size_bytes` above should be overridden at runtime
+with `model.block_size_bytes_for_tokens(4096)` once the model config is known.
 
 ### Oracle Table Structure
 
@@ -809,15 +873,54 @@ def generate_report(metrics, config) -> Report:
     )
 ```
 
+### Research Questions This Phase Answers
+
+Phase 3 parameterizes the hardware model. For the first time, the
+simulator can compare different chip targets on the same workload.
+
+**Q6: How does a custom NPU with HBM+DDR+SSD compare to an A100 on
+agentic coding TTFT at the same cache hit rate?**
+Run the agentic_coding profile on both `custom_npu_global_l3a` and
+`nvidia_a100_80g` configs and compare TTFT p50/p95. The NPU result is
+labeled ANALYTICAL_ONLY — directional comparison is still meaningful
+for architecture decisions even without a calibrated oracle table.
+
+**Q7: What is the break-even point where DDR tier access becomes
+worthwhile vs. full recompute on the custom NPU?**
+The `SavingsEvent.classify()` method computes this per request.
+Aggregate across sessions to find the context length threshold where
+HIT_L2_WIN rate exceeds HIT_L3_BREAK_EVEN rate. This directly informs
+DDR capacity sizing for the NPU.
+
+**Q8 (new): Does global L3A provide the same benefit on the custom NPU
+as it does on GPU hardware?**
+Run `custom_npu_local_l3a` vs `custom_npu_global_l3a` on the heavy
+coding profile with 4 workers. Compare hit rate delta and queue wait
+ratio against the GPU result from Phase 1 (Scenario B). Expected:
+global NPU L3A shows the same directional improvement as global GPU L3A,
+with magnitude differences due to different interconnect bandwidth
+(400 GB/s NPU vs 900 GB/s NVLink). If the delta is smaller on the NPU,
+the lower interconnect bandwidth reduces the benefit of cross-worker
+KV transfer.
+
+Golden files for Q6/Q7/Q8 committed to `results/phase3-baseline/`.
+All NPU results labeled ANALYTICAL_ONLY in every output.
+
 ### Gate: Phase 3 Complete
-- [ ] At least one non-GPU chip (custom_npu_v1) runs end-to-end through
-  Core DES with correct byte-based tier accounting
+- [ ] At least one non-GPU chip (`custom_npu_local_l3a`) runs end-to-end
+  through Core DES with correct byte-based tier accounting
+- [ ] Both `custom_npu_local_l3a` and `custom_npu_global_l3a` configs run
+  and produce different hit rates at 4 workers (same directional delta as GPU)
 - [ ] All outputs for analytical-only targets show "ANALYTICAL-ONLY" label
 - [ ] Calibrated oracle (A100) and analytical-only oracle (custom NPU)
   produce meaningfully different TTFT predictions at 50k tokens
   (verifies roofline fallback is not silently wrong)
-- [ ] Tier parameterization tested with 2-tier (HBM+DDR) and
-  3-tier (HBM+DDR+SSD) configs
+- [ ] Tier parameterization confirmed working with all three configs:
+  2-tier (HBM+DDR — remove L3A from custom_npu to test),
+  3-tier local L3A, 3-tier global L3A
+- [ ] Golden files captured and committed to `results/phase3-baseline/`:
+  Q6 NPU vs A100 TTFT, Q7 DDR break-even context length,
+  Q8 global vs local L3A delta on NPU vs GPU
 
 ---
 
@@ -895,6 +998,36 @@ if request.spawns_subagent:
     self._schedule(ARRIVAL, sub_request, delay_us=0)
 ```
 
+### Research Questions This Phase Answers
+
+Phase 4 adds framework-level schema mapping. These are the questions
+that motivated the entire project. Results are schema-level comparisons,
+not runtime fidelity — see "What This Phase Does NOT Do" below.
+
+**Q9: Does LMCache CPU offload reduce TTFT p95 on the agentic_coding
+workload compared to no KV offload, modeled via tier config?**
+Compare two configs: vLLM baseline (L1 only) vs vLLM + LMCache
+(L1 + L2 CPU offload). Run on heavy agentic_coding profile, 4 workers.
+Expected: TTFT p95 improves by ≥20% with LMCache. If it doesn't, the
+L2 bandwidth model for the target hardware needs revisiting.
+
+**Q10: Does Sarathi chunked prefill reduce chat TTFT p99 in a mixed
+coding+chat workload without degrading coding throughput?**
+Compare two scheduler configs: Orca (prefill-prioritizing) vs Sarathi
+(chunked prefill). Run on a 50/50 coding+chat mixed profile, single worker.
+Expected: chat TTFT p99 drops, coding throughput within 10%.
+Note: this compares scheduling policy semantics via config mapping —
+not actual vLLM chunked prefill execution.
+
+**Q11: How does SGLang RadixAttention (prefix-aware LRU eviction) compare
+to vLLM LRU eviction on cache hit rate for agentic coding sessions?**
+Compare SGLangAdapter (prefix_aware_lru eviction) vs VLLMAdapter (standard
+LRU) on the agentic_coding profile. Expected: SGLang config shows higher
+partial-hit rate because RadixAttention preserves shared prefixes longer.
+
+Golden files for Q9/Q10/Q11 committed to `results/phase4-baseline/`.
+These become the regression baseline for any future engine changes.
+
 ### What This Phase Does NOT Do
 
 - Does not run real vLLM or SGLang processes
@@ -907,6 +1040,11 @@ if request.spawns_subagent:
 - [ ] LMCacheConfigAdapter produces correct L2 tier spec from real LMCache config
 - [ ] Sub-agent spawning tested: parent + 2 sub-agents run concurrently in DES
 - [ ] Config compatibility documented with explicit "schema mapping only" caveat
+- [ ] Golden files captured and committed to `results/phase4-baseline/`:
+  Q9 LMCache vs baseline TTFT, Q10 Sarathi vs Orca mixed workload,
+  Q11 SGLang vs vLLM prefix hit rate
+- [ ] All 11 research questions (Q1–Q11) are answerable from the
+  results in `results/phase1-baseline/` through `results/phase4-baseline/`
 
 ---
 
@@ -986,9 +1124,10 @@ agentsim/
 │   └── runner.py           ← parallel sweep execution
 │
 ├── configs/
-│   ├── heavy_coding.json   ← from cache-sim (canonical)
-│   ├── default.json        ← from cache-sim
-│   └── custom_npu_v1.json  ← new: HBM+DDR, analytical-only
+│   ├── heavy_coding.json        ← from cache-sim (canonical)
+│   ├── default.json             ← from cache-sim
+│   ├── custom_npu_local_l3a.json  ← NPU: HBM+DDR+SSD, local L3A
+│   └── custom_npu_global_l3a.json ← NPU: HBM+DDR+SSD, global L3A (pooled)
 │
 ├── benchmarks/
 │   └── oracle_tables/

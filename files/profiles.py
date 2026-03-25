@@ -171,7 +171,7 @@ def _gpu_l3a(remote: bool = False) -> TierSpec:
         name             = "L3A",
         medium           = "SSD",
         capacity_bytes   = 8 * 1024**4,        # 8 TB
-        bandwidth_bps    = int(7 * 1024**3),   # 7 GB/s
+        bandwidth_bps    = int(25 * 1024**3),  # 25 GB/s
         block_size_bytes = 256 * 1024**2,      # 256 MB — cache-sim default
         scope            = "global" if remote else "per_worker",
         latency_floor_us = 1_000,
@@ -199,11 +199,25 @@ CHIP_PROFILES: dict[str, ChipProfile] = {
         name               = "NVIDIA A100 80GB SXM",
         tiers              = (
             _gpu_l1(capacity_gb=80, bandwidth_tbps=2.0),
-            _GPU_SERVER_L2,
+            TierSpec(
+                name             = "L2",
+                medium           = "DRAM",
+                # 1 TB host DRAM shared across 8 GPUs on the same worker.
+                # Bandwidth: 25 GB/s per GPU × 8 GPUs = 200 GB/s aggregate.
+                capacity_bytes   = 1 * 1024**4,           # 1 TB shared
+                bandwidth_bps    = int(200 * 1024**3),    # 200 GB/s aggregate (25 GB/s × 8)
+                block_size_bytes = 32 * 1024**2,          # 32 MB
+                scope            = "per_worker",
+                latency_floor_us = 100,
+            ),
             _gpu_l3a(),
         ),
         compute_tflops_bf16 = 312,
-        interconnect_bps   = int(600 * 1024**3),   # 600 GB/s NVLink 3
+        # Intra-node: NVLink 3 at 600 GB/s (between GPUs on same server)
+        #             — implicit in same-worker L2 access, not stored here
+        # Cross-node: 200 GB/s total / 8 GPUs = 25 GB/s per GPU
+        #             — stored as per-GPU cross-node rate for L3A transfer math
+        interconnect_bps   = int(25 * 1024**3),           # 25 GB/s per GPU cross-node
         n_gpus_per_worker  = 8,
         confidence         = ConfidenceLabel.CALIBRATED,
         oracle_table       = "benchmarks/oracle_tables/a100_llama3_70b.json",
@@ -237,42 +251,102 @@ CHIP_PROFILES: dict[str, ChipProfile] = {
         oracle_table       = None,
     ),
 
-    # Custom NPU with HBM + DDR two-tier hierarchy.
+    # Custom NPU with HBM + DDR + SSD three-tier hierarchy (Option A).
+    # Mirrors the GPU topology (L1/L2/L3A) but with NPU-specific specs.
+    #
     # Note on "4K page size" from original spec:
     #   "4K" refers to 4096 tokens per KV page.
     #   In bytes, for Llama3-70B BF16:
     #   4096 tokens × (80 layers × 8 kv_heads × 128 dim × 2 × 2 bytes) = ~671 MB
     #   That is the block_size_bytes on L1 below.
-    #   Tune to your actual NPU's memory management unit page size.
-    "custom_npu_hbm_ddr": ChipProfile(
-        name               = "Custom NPU (HBM + DDR)",
+    #   Override at runtime with model.block_size_bytes_for_tokens(4096).
+    #
+    # Two named variants:
+    #   "custom_npu_local_l3a"  — each worker's SSD is local only
+    #   "custom_npu_global_l3a" — SSDs are pooled across all workers
+    # This mirrors the GPU global/local L3A toggle for direct comparison.
+    "custom_npu_local_l3a": ChipProfile(
+        name               = "Custom NPU (HBM + DDR + SSD, local L3A)",
         tiers              = (
             TierSpec(
                 name             = "L1",
                 medium           = "HBM",
-                capacity_bytes   = 32 * 1024**3,         # 32 GB
-                bandwidth_bps    = int(900 * 1024**3),   # 900 GB/s
-                # 4096-token page × bytes_per_token for Llama3-70B BF16:
-                # Override at runtime with model.block_size_bytes_for_tokens(4096)
-                block_size_bytes = 4096 * 160 * 2,       # placeholder: 4096 × ~320 bytes
+                capacity_bytes   = 64 * 1024**3,         # 64 GB
+                bandwidth_bps    = int(1800 * 1024**3),  # 1,800 GB/s
+                block_size_bytes = 4096 * 160 * 2,       # 4K-token page placeholder
                 scope            = "per_gpu",
                 latency_floor_us = 1,
             ),
             TierSpec(
                 name             = "L2",
                 medium           = "DDR",
-                capacity_bytes   = 256 * 1024**3,        # 256 GB
-                bandwidth_bps    = int(200 * 1024**3),   # 200 GB/s
-                block_size_bytes = 32 * 1024**2,         # 32 MB
+                # 256 GB per NPU × 16 NPUs = 4 TB total shared pool.
+                # Bandwidth: 64 GB/s per NPU × 16 NPUs = 1,024 GB/s aggregate.
+                capacity_bytes   = 4 * 1024**4,           # 4 TB shared across 16 NPUs
+                bandwidth_bps    = int(1024 * 1024**3),   # 1,024 GB/s aggregate (64 GB/s × 16)
+                block_size_bytes = 32 * 1024**2,          # 32 MB
                 scope            = "per_worker",
                 latency_floor_us = 200,
             ),
+            TierSpec(
+                name              = "L3A",
+                medium            = "SSD",
+                capacity_bytes    = 8 * 1024**4,         # 8 TB
+                bandwidth_bps     = int(25 * 1024**3),   # 25 GB/s
+                block_size_bytes  = 256 * 1024**2,       # 256 MB
+                scope             = "per_worker",        # local — not shared
+                latency_floor_us  = 1_000,
+                remote_latency_us = 0,
+            ),
         ),
-        compute_tflops_bf16 = 200,
-        interconnect_bps   = int(400 * 1024**3),
-        n_gpus_per_worker  = 4,
-        confidence         = ConfidenceLabel.ANALYTICAL_ONLY,
-        oracle_table       = None,
+        compute_tflops_bf16 = 640,
+        # 25 GB/s cross-node interconnect — same as A100 cross-node.
+        # Used for cross-worker L3A transfers in global mode.
+        interconnect_bps    = int(25 * 1024**3),         # 25 GB/s per NPU
+        n_gpus_per_worker   = 16,
+        confidence          = ConfidenceLabel.ANALYTICAL_ONLY,
+        oracle_table        = None,
+    ),
+
+    "custom_npu_global_l3a": ChipProfile(
+        name               = "Custom NPU (HBM + DDR + SSD, global L3A)",
+        tiers              = (
+            TierSpec(
+                name             = "L1",
+                medium           = "HBM",
+                capacity_bytes   = 64 * 1024**3,         # 64 GB
+                bandwidth_bps    = int(1800 * 1024**3),  # 1,800 GB/s
+                block_size_bytes = 4096 * 160 * 2,
+                scope            = "per_gpu",
+                latency_floor_us = 1,
+            ),
+            TierSpec(
+                name             = "L2",
+                medium           = "DDR",
+                # 256 GB per NPU × 16 NPUs = 4 TB total shared pool.
+                # Bandwidth: 64 GB/s per NPU × 16 NPUs = 1,024 GB/s aggregate.
+                capacity_bytes   = 4 * 1024**4,           # 4 TB shared across 16 NPUs
+                bandwidth_bps    = int(1024 * 1024**3),   # 1,024 GB/s aggregate (64 GB/s × 16)
+                block_size_bytes = 32 * 1024**2,
+                scope            = "per_worker",
+                latency_floor_us = 200,
+            ),
+            TierSpec(
+                name              = "L3A",
+                medium            = "SSD",
+                capacity_bytes    = 8 * 1024**4,         # 8 TB per worker, pooled globally
+                bandwidth_bps     = int(25 * 1024**3),   # 25 GB/s
+                block_size_bytes  = 256 * 1024**2,
+                scope             = "global",            # pooled across all workers
+                latency_floor_us  = 1_000,
+                remote_latency_us = 50_000,              # 50ms cross-worker
+            ),
+        ),
+        compute_tflops_bf16 = 640,
+        interconnect_bps    = int(25 * 1024**3),         # 25 GB/s per NPU cross-node
+        n_gpus_per_worker   = 16,
+        confidence          = ConfidenceLabel.ANALYTICAL_ONLY,
+        oracle_table        = None,
     ),
 }
 
