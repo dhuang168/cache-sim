@@ -1,0 +1,87 @@
+{
+  "baseline": {
+    "label": "Baseline (per-session)",
+    "completed": 9849,
+    "combined_hit_rate": 0.9993,
+    "hit_rate": {
+      "L1": 0.5325,
+      "L2": 0.0209,
+      "L3A": 0.4458,
+      "miss": 0.0007
+    },
+    "ttft_p50_s": 5.74,
+    "ttft_p95_s": 138.39,
+    "recompute_mean": 0.2628,
+    "tier_saturation": {
+      "L1": 58.76,
+      "L2": 75.21,
+      "L3A": 63.03
+    },
+    "sharing_factor": 1.702,
+    "elapsed_s": 0.8
+  },
+  "openai_prefix": {
+    "label": "OpenAI Prefix (128-tok blocks)",
+    "completed": 9849,
+    "combined_hit_rate": 0.9993,
+    "hit_rate": {
+      "L1": 0.3593,
+      "L2": 0.0196,
+      "L3A": 0.6204,
+      "miss": 0.0007
+    },
+    "ttft_p50_s": 4.4,
+    "ttft_p95_s": 141.52,
+    "recompute_mean": 0.2651,
+    "tier_saturation": {
+      "L1": 57.69,
+      "L2": 75.24,
+      "L3A": 62.79
+    },
+    "sharing_factor": 1.686,
+    "elapsed_s": 0.6
+  },
+  "anthropic_segment": {
+    "label": "Anthropic Segment (3 breakpoints)",
+    "completed": 9849,
+    "combined_hit_rate": 0.9993,
+    "hit_rate": {
+      "L1": 0.5882,
+      "L2": 0.0175,
+      "L3A": 0.3936,
+      "miss": 0.0007
+    },
+    "ttft_p50_s": 5.64,
+    "ttft_p95_s": 144.15,
+    "recompute_mean": 0.2628,
+    "tier_saturation": {
+      "L1": 62.42,
+      "L2": 76.65,
+      "L3A": 72.19
+    },
+    "sharing_factor": 1.72,
+    "elapsed_s": 2.3
+  },
+  "lmcache_chunk": {
+    "label": "LMCache Chunk (256-tok tail-first)",
+    "completed": 9849,
+    "combined_hit_rate": 0.4872,
+    "hit_rate": {
+      "L1": 0.4872,
+      "L2": 0.0,
+      "L3A": 0.0,
+      "miss": 0.5128
+    },
+    "ttft_p50_s": 50.01,
+    "ttft_p95_s": 117.8,
+    "recompute_mean": 0.7775,
+    "tier_saturation": {
+      "L1": 78.58,
+      "L2": 68.18,
+      "L3A": 39.59
+    },
+    "sharing_factor": 1.165,
+    "elapsed_s": 4.0,
+    "dedup_ratio": 0.7474
+  }
+}
