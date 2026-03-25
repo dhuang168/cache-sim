@@ -1,0 +1,34 @@
+[importlinter]
+root_package = agentsim
+
+[importlinter:contract:no-old-modules-in-new-code]
+name = New code must not import from deprecated modules
+type = forbidden
+source_modules =
+    agentsim.core.des
+    agentsim.core.observation
+    agentsim.integration
+    agentsim.sweep
+forbidden_modules =
+    agentsim.core.hardware_model
+    agentsim.core.session_model
+    agentsim.sim.request_sim
+
+[importlinter:contract:observation-layer-is-downstream-only]
+name = Observation layer must not import from integration or sweep
+type = forbidden
+source_modules =
+    agentsim.core.observation
+forbidden_modules =
+    agentsim.integration
+    agentsim.sweep
+
+[importlinter:contract:des-core-has-no-upward-dependencies]
+name = Core DES must not import from observation, integration, or sweep
+type = forbidden
+source_modules =
+    agentsim.core.des
+forbidden_modules =
+    agentsim.core.observation
+    agentsim.integration
+    agentsim.sweep

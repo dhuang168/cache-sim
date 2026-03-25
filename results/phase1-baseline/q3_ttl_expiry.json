@@ -1,0 +1,19 @@
+{
+  "total_cache_decisions": 10604,
+  "expiry_misses": 0,
+  "expiry_rate": 0.0,
+  "miss_summary": {
+    "total_turns": 10604,
+    "full_hit_rate": 0.0,
+    "partial_hit_rate": 0.994341757827235,
+    "cross_request_hit_rate": 0.0,
+    "cold_miss_rate": 0.001980384760467748,
+    "expiry_miss_rate": 0.0,
+    "eviction_miss_rate": 0.0036778574122972463,
+    "total_miss_rate": 0.005658242172764994,
+    "total_tokens_read_from_cache": 492821092,
+    "total_tokens_written_to_cache": 158915989,
+    "cache_efficiency_ratio": 0.7561654942877187
+  },
+  "answer": "0 expiry misses out of 10604 decisions (0.0%)"
+}

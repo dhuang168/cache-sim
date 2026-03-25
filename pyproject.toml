@@ -17,11 +17,12 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-benchmark",
+    "import-linter>=2.0",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["sim*", "scripts*"]
+include = ["sim*", "agentsim*", "scripts*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

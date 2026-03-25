@@ -1,0 +1,31 @@
+{
+  "default_l1_legacy": {
+    "hit_rate": 0.9993,
+    "miss_pct": 0.1,
+    "ttft_p50_s": 4.47,
+    "ttft_p95_s": 140.52,
+    "prefill_mean_s": 23.61
+  },
+  "default_l1_disagg": {
+    "hit_rate": 0.9993,
+    "miss_pct": 0.1,
+    "ttft_p50_s": 3.8,
+    "ttft_p95_s": 149.12,
+    "prefill_mean_s": 24.35
+  },
+  "stressed_l1_legacy": {
+    "hit_rate": 0.9993,
+    "miss_pct": 0.1,
+    "ttft_p50_s": 7.55,
+    "ttft_p95_s": 25.16,
+    "prefill_mean_s": 9.24
+  },
+  "stressed_l1_disagg": {
+    "hit_rate": 0.9993,
+    "miss_pct": 0.1,
+    "ttft_p50_s": 6.51,
+    "ttft_p95_s": 21.79,
+    "prefill_mean_s": 7.99
+  },
+  "answer": "Disagg improvement under stressed vs default L1"
+}

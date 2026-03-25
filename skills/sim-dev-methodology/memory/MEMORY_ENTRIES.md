@@ -7,3 +7,5 @@
 - [methodology_experiments.md](methodology_experiments.md) - Experiment design: controlled load, seed sensitivity, reliable metrics
 - [methodology_reports.md](methodology_reports.md) - Report writing: preserve history, cross-check claims against data
 - [methodology_perf_gate.md](methodology_perf_gate.md) - Performance gate: profile new features at small scale before running large sims
+- [methodology_reflection.md](methodology_reflection.md) - Reflection cycle: cross-check all results for inconsistencies, investigate until clean
+- [methodology_think_before_sim.md](methodology_think_before_sim.md) - Think before running: exhaust free checks (grep configs, diff params, reason about math) before launching sims

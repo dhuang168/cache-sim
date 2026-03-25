@@ -1,0 +1,17 @@
+{
+  "metadata": {
+    "chip": "custom_npu_v1",
+    "model": "llama3_70b_fp16",
+    "source": "roofline_model",
+    "confidence": "analytical-only",
+    "roofline_params": {
+      "hbm_bandwidth_bps": 966367641600,
+      "compute_tflops": 200,
+      "compute_efficiency": 0.55,
+      "memory_efficiency": 0.85,
+      "note": "32GB HBM + 256GB DDR + SSD, 4 GPUs/worker"
+    }
+  },
+  "points": null,
+  "extrapolation": "roofline"
+}

@@ -1,0 +1,33 @@
+{
+  "vllm": {
+    "label": "vLLM LRU",
+    "completed": 9849,
+    "hit_rate": 0.9993,
+    "cache_hit_rate": {
+      "L1": 0.02934,
+      "L2": 0.00264,
+      "L3A": 0.9673,
+      "miss": 0.0007107
+    },
+    "ttft_p50_s": 7.4,
+    "dedup_ratio": null,
+    "recompute_mean": 0.263
+  },
+  "sglang": {
+    "label": "SGLang RadixAttention",
+    "completed": 9849,
+    "hit_rate": 0.5493,
+    "cache_hit_rate": {
+      "L1": 0.5493,
+      "L2": 0.0,
+      "L3A": 0.0,
+      "miss": 0.4507
+    },
+    "ttft_p50_s": 38.28,
+    "dedup_ratio": 0.3827,
+    "recompute_mean": 0.8303
+  },
+  "hit_rate_delta_pct": -45.0,
+  "answer": "SGLang hit rate 0.549 vs vLLM 0.999 (delta=-45.0pt)",
+  "caveat": "SGLang RadixAttention modeled as tail_first chunk eviction, not actual radix tree"
+}

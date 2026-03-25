@@ -1,0 +1,11 @@
+{
+  "total_decisions": 10604,
+  "anthropic_hits": 10544,
+  "anthropic_misses": 60,
+  "anthropic_expiry": 0,
+  "openai_hits": 3363,
+  "openai_misses": 7241,
+  "observability_gap": 7181,
+  "gap_pct": 67.7,
+  "answer": "OpenAI misclassifies 7181 decisions (67.7%) vs Anthropic ground truth"
+}

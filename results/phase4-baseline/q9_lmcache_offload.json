@@ -1,0 +1,18 @@
+{
+  "vllm_baseline": {
+    "label": "vLLM baseline",
+    "completed": 9849,
+    "hit_rate": 0.9993,
+    "ttft_p50_s": 1.36,
+    "ttft_p95_s": 138.23
+  },
+  "vllm_lmcache": {
+    "label": "vLLM + LMCache",
+    "completed": 9849,
+    "hit_rate": 0.4526,
+    "ttft_p50_s": 50.28,
+    "ttft_p95_s": 120.89
+  },
+  "ttft_p95_improvement_pct": 12.5,
+  "answer": "LMCache CPU offload changes TTFT p95 by +12.5%"
+}

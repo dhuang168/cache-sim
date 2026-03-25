@@ -1,0 +1,17 @@
+{
+  "a100": {
+    "label": "A100 (calibrated)",
+    "completed": 9849,
+    "hit_rate": 0.9993,
+    "ttft_p50_s": 22.34,
+    "ttft_p95_s": 145.82
+  },
+  "npu_global": {
+    "label": "NPU global (analytical-only)",
+    "completed": 9340,
+    "hit_rate": 0.9998,
+    "ttft_p50_s": 78.53,
+    "ttft_p95_s": 225.69
+  },
+  "answer": "A100 TTFT p50=22.34s vs NPU p50=78.53s (NPU is ANALYTICAL-ONLY)"
+}

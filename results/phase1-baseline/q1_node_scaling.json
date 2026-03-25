@@ -1,0 +1,12 @@
+{
+  "1w_global": 0.998,
+  "1w_local": 0.998,
+  "2w_global": 0.998,
+  "2w_local": 0.998,
+  "4w_global": 0.998,
+  "4w_local": 0.998,
+  "8w_global": 0.998,
+  "8w_local": 0.998,
+  "crossover_workers": null,
+  "answer": "Local stays >= 90% at all tested scales"
+}
